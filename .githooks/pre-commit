@@ -1,0 +1,22 @@
+#!/bin/sh
+# Commit gate: desensitization check (see README "Before you commit").
+# Enable once per clone:  git config core.hooksPath .githooks
+# Emergency skip (not recommended):  git commit --no-verify
+#
+# ASCII-only on purpose: hooks may run under a non-UTF-8 codepage.
+
+if command -v python >/dev/null 2>&1; then
+  PY=python
+elif command -v python3 >/dev/null 2>&1; then
+  PY=python3
+else
+  echo "[pre-commit] python not found; skipping secret check (verify manually!)" >&2
+  exit 0
+fi
+
+"$PY" tools/check-secrets.py --staged || {
+  echo "" >&2
+  echo "[pre-commit] blocked: staged content failed the desensitization check." >&2
+  echo "             Fix the findings above, or use 'git commit --no-verify' to bypass (not recommended)." >&2
+  exit 1
+}

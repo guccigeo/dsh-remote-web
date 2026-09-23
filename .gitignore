@@ -20,3 +20,20 @@ tools/out/
 *.bak
 Thumbs.db
 desktop.ini
+
+# ---- 脱敏加固：这些文件类型/名字一律不入库（防手滑） ----
+# 日志（可能含访问地址与令牌片段）
+*.log
+# 密钥与证书
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+# 环境变量与凭证文件
+.env
+.env.*
+*.credentials.yaml
+credentials.yaml
+secrets.json

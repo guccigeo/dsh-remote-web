@@ -48,6 +48,18 @@ WebSocket（DSH 流式走 `/api/remote.mux`，不是 SSE）也在本地验证过
 | 隧道在服务器上 | ssh 到服务器 `ss -ltn \| grep 17933` | `0.0.0.0:17933` 由 sshd 监听 |
 | 代理日志 | `Get-Content access.log -Tail 20` | 有 `minted DSH session cookie` / `listening` |
 
+### 2.4 脱敏闸门（提交前必跑）
+
+```sh
+python tools/check-secrets.py            # 扫全部被跟踪文件
+python tools/check-secrets.py --staged   # 只扫暂存区（pre-commit 钩子用）
+git config core.hooksPath .githooks      # 启用钩子（每个 clone 一次）
+```
+
+最近一次：`干净：已扫 N 个文件，含本机真实令牌/服务器地址比对`。
+
+规则与占位符规范见 [README §十一](../README.md)。闸门已实测能拦住违规提交（故意种入假 IP/邮箱/路径 → `git commit` 被拒绝）。
+
 ## 三、已完成功能
 
 | 功能 | 状态 | 验证方式 |
@@ -120,7 +132,7 @@ WebSocket（DSH 流式走 `/api/remote.mux`，不是 SSE）也在本地验证过
 | 代理监听 | `127.0.0.1:19390` |
 | 隧道 | `本机 19390 → 服务器 0.0.0.0:17933` |
 | 令牌 | `remote.config.json` → `token`（该文件不入库） |
-| 仓库 | GitHub 公开仓库 [guccigeo/dsh-remote-web](https://github.com/guccigeo/dsh-remote-web)（`main` 为脱敏后的单提交历史；本地 `master` 保留完整私有历史，**永不可推送**） |
+| 仓库 | GitHub 公开仓库 [guccigeo/dsh-remote-web](https://github.com/guccigeo/dsh-remote-web)。分支约定：`main` = 公开（只放脱敏内容）；`master` = 本地私有历史（**永不可推送**）。提交闸门见 [2.4](#24-脱敏闸门提交前必跑) |
 
 ## 七、关键设计决策
 
