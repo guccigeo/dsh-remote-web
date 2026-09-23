@@ -75,13 +75,25 @@ http://<你的服务器IP>:17933/?token=<你的令牌>
       安全组 → firewalld(17933/tcp) → sshd 监听 0.0.0.0:17933
                           └──SSH 加密隧道──▶ 本机 ssh
                                               └─▶ 本机代理 127.0.0.1:19390（令牌鉴权 + 注入移动端适配层）
-                                                    └─ 注入 DSH 会话 cookie ─▶ DSH GUI 127.0.0.1:19387
+                                                    └─ 注入 DSH 会话 cookie ─▶ DSH GUI 127.0.0.1:<动态端口>
 ```
 
 和常见的「内网服务 + 反向隧道」面板是同一套路，只是多了一个**代理**。代理存在的两个理由：
 
 1. **DSH 故意不允许 `--host 0.0.0.0`**（启动时硬拒绝，理由是把 RCE 暴露到网络），`/api` 还有 Host/Origin 栅栏防 DNS rebinding。代理不绕过这些设计，而是把 Host/Origin 规范成 loopback 权威，由代理自己承担对外鉴权。
 2. **`dsh web` 打印的 `?token=` 是进程级的**，每次重启 DSH 就换，做不了手机书签。DSH 的浏览器会话 cookie 用的是 `~/.dsh/.credentials.yaml` 里**持久化**的签名密钥，代理读该密钥自行签发 cookie，所以对手机而言令牌是**长期稳定**的。
+
+### 上游端口是自动发现的（DSH 重启会换端口）
+
+**DSH 的 Web 端口是动态的** —— 实测重启后从 `19387` 变成 `3080`。所以代理不写死它：
+
+1. 先试配置里的 `upstream`，再试环境变量 `DSH_WEB_URL`（从 DSH 的终端里启动代理时能拿到）；
+2. 都不通就扫本机处于 LISTEN 的端口 + 常见端口，用 DSH 的特征响应认出来（`401` + `dsh web authentication required`）；
+3. 切到新端口时**自动重签 cookie**（cookie 名与内容都绑定上游 authority），所以 DSH 换端口后手机侧不用做任何事。
+
+配置里的 `upstream` 只是个「优先试它」的提示，写错也会自愈。日志里能看到 `upstream 切换为 127.0.0.1:xxxx`。
+
+> ⚠️ **代理与隧道必须是独立进程**：如果从 DSH 的终端里启动，它们会变成 DSH 的子进程，**DSH 一重启就被连带杀掉**（本项目的 start-all.bat / 登录自启 VBS / launchd 都是独立启动，不受影响）。
 
 设计决策的完整理由见 [docs/STATE.md 第七节](docs/STATE.md)。
 
@@ -90,7 +102,7 @@ http://<你的服务器IP>:17933/?token=<你的令牌>
 | 文件 | 作用 |
 |---|---|
 | `dsh-remote-web.mjs` | 鉴权代理（Node 零依赖）：令牌校验、注入 DSH cookie、HTTP/SSE/WebSocket 透传、注入移动端适配层 |
-| `remote.config.json` | **本地配置（不入库）**：令牌、监听端口、上游地址、`mobileEnhance` 开关。首次从 `remote.config.example.json` 复制 |
+| `remote.config.json` | **本地配置（不入库）**：令牌、监听端口、上游地址（**只是候选提示**，会自动发现真实端口）、`mobileEnhance` 开关。首次从 `remote.config.example.json` 复制 |
 | `mobile.css` / `mobile.js` | 移动端适配层，由代理注入 `index.html`。详见 [docs/MOBILE.md](docs/MOBILE.md) |
 | `run-proxy.ps1` / `run-tunnel.ps1` | Windows 监管启动器（退出自动重启；写 PID 文件） |
 | `dsh_remote_web.vbs` | Windows **登录自启**（已装进 `shell:startup`） |
@@ -186,7 +198,7 @@ chmod +x mac/*.sh
 
 ### Mac 上要注意的三点
 
-1. **DSH 的端口不一定和 Windows 一样**（Windows 上实测是 19387）。代理读配置的 `upstream`；**留空时**会先看环境变量 `DSH_WEB_URL`（DSH 注入给 shell 的），再退回 `127.0.0.1:19387`。最省事的做法是**从 DSH 里启动代理**（`node dsh-remote-web.mjs`），或先 `echo $DSH_WEB_URL` 看端口再填进配置。
+1. **DSH 的端口是动态的，不用手动填**：代理会自动发现（先试配置 `upstream` / 环境变量 `DSH_WEB_URL`，再扫本机监听端口并用 DSH 特征响应认出来）。所以 Mac 上不需要 `echo $DSH_WEB_URL` 再填配置 —— 留空或写错都能自愈。
 2. **ssh 密钥名**。Windows 上在 `tunnel.identityFile` 里指定（例如 `C:/Users/<你>/.ssh/id_ed25519`）；Mac 若是默认的 `~/.ssh/id_ed25519` 无需配置。
 3. **服务器侧零改动**。`GatewayPorts clientspecified`、firewalld、安全组都在服务器上，与你本机是 Windows 还是 Mac 无关。因此 **Windows 和 Mac 不能同时启动** —— 会抢同一个远端端口 17933。换机器前先 `stop-all.bat` / `./mac/stop.sh`。
 
@@ -210,6 +222,8 @@ chmod +x mac/*.sh
 | 现象 | 原因 / 处理 |
 |---|---|
 | 手机打不开（超时） | 先看是不是安全组没放行：`curl -o NUL -w "%{http_code}" http://<服务器IP>:17933/` 返回 000 = 不通。本机开 VPN 也会导致打公网地址超时（路由绕行），关掉即通 |
+| **重启 DSH 后远程打不开** | **两个独立原因，按顺序查**：① DSH 换了 Web 端口 —— 代理会自动发现，看日志有没有 `upstream 切换为 …`；② **代理/隧道本身被连带杀掉了**（从 DSH 终端启动的话它们就是 DSH 的子进程）→ `Test-NetConnection 127.0.0.1 -Port 19390` 为 False = 代理没了，跑 `start-all.bat`；服务器上 `ss -ltn \| grep 17933` 没有 = 隧道没了。独立启动器（登录自启 VBS / launchd）不受 DSH 重启影响 |
+| 公网连接被**拒绝**（不是超时） | 服务器上没有监听者 = 隧道断了 → 重启隧道。区别于「超时」（那是安全组 / VPN 的问题） |
 | 手机 401 | 令牌不对，或 Cookie 过期 → 用带 `?token=` 的地址重新访问一次 |
 | 页面 502 / 提示连不上上游 | DSH 没在跑。代理只管转发，DSH 关了它也没辙 |
 | 页面提示「DSH 拒绝了代理注入的会话 cookie」 | DSH 的 browser-session 密钥被轮换过。代理会自动换新 cookie，刷新重试；仍不行就重启代理 |

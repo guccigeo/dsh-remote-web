@@ -92,22 +92,43 @@
     return false
   }
 
-  /** 只在「窄屏 + 抽屉已关 + 没有模态框」时显示汉堡按钮 */
+  /**
+   * 只在「窄屏 + 抽屉已关 + 没有模态框」时显示汉堡按钮。
+   * 只在状态真的变化时才动 DOM —— setAttribute 即使值相同也会产生 mutation
+   * 记录，配合下面的兜底巡检会变成每帧自激的循环。
+   */
   function syncHamburger(narrow, collapsed) {
     var button = ensureHamburger()
-    if (narrow && collapsed && !hasOpenModal()) button.removeAttribute('hidden')
+    var show = narrow && collapsed && !hasOpenModal()
+    if (show === !button.hasAttribute('hidden')) return
+    if (show) button.removeAttribute('hidden')
     else button.setAttribute('hidden', '')
   }
 
   /**
-   * 右栏在窄屏下是全屏浮层。注意：frame 上的 data-rightbar-collapsed 属性
-   * 只描述「停靠列」，全屏面板打开时该属性仍在（实测）——所以这里直接量
-   * 面板本身：可见 + 宽度盖过大部分视口才算「右栏全屏开着」。
+   * 右栏在窄屏下是浮层，判断它「是否真的打开」有两个坑（都实测踩过）：
+   *
+   *   1. frame 上的 `data-rightbar-collapsed` 只描述「停靠列」，**开关右栏时它
+   *      一直存在**（打开时也在）—— 按属性判断永远得到"已关闭"。
+   *   2. 光量面板容器也不可靠：DSH 0.1.7 在**关闭态**同样把面板容器留在屏内
+   *      （x=0、宽 = 视口宽），只是把里面的内容 translateX 推出屏幕。按容器
+   *      宽度判断会把"关着"当成"开着"，于是汉堡按钮被误藏、用户打不开会话列表。
+   *
+   * 所以这里认**语义信号**：面板顶栏那个「收起右侧边栏」按钮是否真的落在视口里
+   * （关闭态时它在 x≈798 的屏幕外）。拿不到按钮才退回量容器。
    */
   function rightbarFullscreenOpen() {
+    var buttons = document.querySelectorAll('button')
+    for (var i = 0; i < buttons.length; i++) {
+      var label = buttons[i].getAttribute('aria-label') || ''
+      if (label.indexOf('收起右侧边栏') === -1) continue
+      var box = buttons[i].getBoundingClientRect()
+      return box.width > 2 && box.left >= -1 && box.right <= window.innerWidth + 1
+    }
     var panel = document.querySelector('[class*="_rightbarCol"] [class*="_panel"]')
     if (!panel) return false
-    if (window.getComputedStyle(panel).visibility === 'hidden') return false
+    var cs = window.getComputedStyle(panel)
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false
     return panel.getBoundingClientRect().width > window.innerWidth * 0.6
   }
 
@@ -129,7 +150,9 @@
     syncHamburger(narrow && !rightOpen, !expanded)
 
     if (expanded && narrow) {
-      document.documentElement.setAttribute(MARK, 'drawer')
+      if (document.documentElement.getAttribute(MARK) !== 'drawer') {
+        document.documentElement.setAttribute(MARK, 'drawer')
+      }
       if (!side.parentElement.querySelector('[' + BACKDROP_ATTR + ']')) {
         var backdrop = document.createElement('div')
         backdrop.setAttribute(BACKDROP_ATTR, '')
@@ -146,7 +169,7 @@
         side.parentElement.insertBefore(backdrop, side)
       }
     } else {
-      document.documentElement.removeAttribute(MARK)
+      if (document.documentElement.hasAttribute(MARK)) document.documentElement.removeAttribute(MARK)
       removeBackdrop()
     }
   }
@@ -172,13 +195,20 @@
       if (window.innerWidth > MOBILE_MAX) return
       var frame = frameEl()
       if (!frame || frame.hasAttribute('data-sidebar-collapsed')) return
-      // 等 App 先完成选中（React 的处理挂在 root 容器上），再收起抽屉
-      window.setTimeout(function () {
+      // 等 App 先完成选中（React 的处理挂在 root 容器上），再收起抽屉。
+      // 要重试：选会话会触发侧栏重渲染，+120ms 时那个切换按钮可能已经不在
+      // 文档里（点脱离文档的节点什么都不会发生）—— 新版 DSH 上实测过一次
+      // 点击收不掉的情况。最多试 4 次，成功（或抽屉已被别的原因收起）即停。
+      var attempts = 0
+      var collapse = function () {
+        attempts++
         var f = frameEl()
         if (!f || f.hasAttribute('data-sidebar-collapsed')) return
         var toggle = findToggle()
         if (toggle) toggle.click()
-      }, 120)
+        if (attempts < 4) window.setTimeout(collapse, 350)
+      }
+      window.setTimeout(collapse, 150)
     },
     true
   )
@@ -269,10 +299,19 @@
     subtree: true,
     childList: true,
     attributes: true,
-    attributeFilter: ['data-sidebar-collapsed', 'data-rightbar-collapsed', 'data-slot', 'class']
+    // style 必须监听：新版 DSH 开关右栏时只改内联 transform（不改 class），
+    // 漏了它就会出现「关了右栏，汉堡按钮不回来」（实测踩过）。
+    attributeFilter: ['data-sidebar-collapsed', 'data-rightbar-collapsed', 'data-slot', 'class', 'style']
   })
   window.addEventListener('resize', schedule)
   window.addEventListener('orientationchange', schedule)
+
+  /* 兜底巡检：App 有些状态变化不产生可观察的 mutation（改的是内部 state 或
+     只动画 transform）。低频扫一遍，成本是几个 querySelector。
+     sync() 已做成幂等（只在状态真的变化时才动 DOM），不会自激。 */
+  window.setInterval(function () {
+    if (window.innerWidth <= MOBILE_MAX) schedule()
+  }, 800)
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', schedule)

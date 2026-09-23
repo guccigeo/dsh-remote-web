@@ -452,4 +452,11 @@
   [class*="_hoverContent"] {
     display: none !important;
   }
+
+  /* DSH 新版（0.1.7）的「复制」动作按钮：类名是 _action、aria=复制，实测 28×28。
+     按 aria 限定，避免误伤其它 _action 元素。 */
+  [class*="_action"][aria-label="复制"] {
+    min-width: 32px;
+    min-height: 32px;
+  }
 }

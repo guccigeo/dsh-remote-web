@@ -27,6 +27,16 @@ cmd.exe 用 OEM 代码页（中文 Windows = GBK）读 `.bat`，UTF-8 中文乱�
 **A6. 隧道端口和 firewalld 都对了，仍可能不通。**
 → 用**同机同客户端对照法**：拿一个已知可用的端口做参照，通/不通一比就知道是不是安全组。
 
+**A7. DSH 的 Web 端口是动态的，别写死。**
+实测重启 DSH 后从 `19387` 变成 `3080` —— 写死配置的话，DSH 每重启一次远程入口就 502 一次，而且现象很像「代理坏了」。
+→ 用**特征响应**把它认出来：DSH Web 对未鉴权的 `GET /` 固定回 `401` + 文案 `dsh web authentication required`。扫本机 LISTEN 端口逐个探一下即可；**并发探测**（串行 20 多个候选要 6 秒以上）。
+→ 端口变了必须**重签 cookie**：DSH 的 cookie 名与内容都绑定 authority（`dsh-auth-<sha256(authority)>` + body 里的 `authority`）。
+
+**A8. 从 DSH 终端里启动的代理/隧道，会随 DSH 重启被连带杀掉。**
+它们是 DSH 的子进程，DSH 一重启整棵进程树就没了。实测踩过：重启 DSH 后 17933 的隧道消失，服务器上 `ss -ltn` 查不到监听（公网表现为**连接被拒绝**，区别于超时=安全组/VPN），而机器上还活着的那个 ssh 是**另一个项目的**隧道（转发 17932）。
+→ 用**独立启动器**：Windows 登录自启 VBS（`WScript.Shell.Run`）、macOS launchd、或 `start-all.bat`（`start` 脱离父进程）。
+→ 排查时先分清是哪一层死了：`Test-NetConnection 127.0.0.1 -Port 19390`（代理）→ 服务器 `ss -ltn | grep 17933`（隧道）→ 再看上游端口（日志 `upstream …`）。
+
 ## B. 移动端适配
 
 **B1. 给 grid item 设 `position:absolute` 会让它退出自动排布，后续兄弟元素整体前移一轨。**
@@ -87,9 +97,10 @@ React 18 的事件处理挂在 root 容器上，而委托监听在捕获阶段�
 → 这类判断放 JS 里按「实际尺寸 + `visibility`」做（见 `mobile.js` 的 `hasOpenModal()`）。
 → 也说明**每次改完都要跑审计**：这个错误是审计当场抓到的，没上到手机上。
 
-**B17. `data-rightbar-collapsed` 只描述「停靠列」，不代表全屏面板开关。**
-右栏在窄屏下是 App 自己切的全屏浮层（`position:fixed; z-index:40`），打开时 frame 上的 `data-rightbar-collapsed` **仍然存在**（停靠列依然是折叠的）。按属性判断「右栏开着」永远得到 false。
-→ 判断浮层类 UI 的可见性，直接量面板本身（`visibility` + 实际尺寸），见 `mobile.js` 的 `rightbarFullscreenOpen()`。
+**B17. `data-rightbar-collapsed` 只描述「停靠列」，不代表右栏开关状态。**
+打开右栏时该属性**仍然存在**（实测），按属性判断永远得到"已关闭"。
+→ 判断浮层类 UI 的可见性，别只看状态属性。但也别只量容器：DSH 0.1.7 在**关闭态**同样把面板容器留在屏内（`x=0`、宽 = 视口宽），只是把内容 `translateX(420px)` 推出屏幕 —— 按容器宽度判断会把"关着"当成"开着"，于是汉堡按钮被误藏、用户打不开会话列表（真踩过）。
+→ 认**语义信号**：面板顶栏那个「收起右侧边栏」按钮是否真的落在视口内（关闭态时它在 x≈798 的屏幕外）。见 `mobile.js` 的 `rightbarFullscreenOpen()`。
 
 **B18. 短 local 类名会跨模块撞车，用之前先查类名清单。**
 `_bubble` 既是 Tooltip 的气泡又是聊天消息气泡；`_list`/`_footer`/`_dialog`/`_card` 都被多个模块用。
@@ -98,6 +109,15 @@ React 18 的事件处理挂在 root 容器上，而委托监听在捕获阶段�
 **B19. 手机上点「添加工作区」，对话框会弹在电脑屏幕上。**
 `directory-picker-auto` 的选型逻辑：loopback 绑定 + win32/darwin → **native** 后端（系统目录对话框开在主机桌面）。远程浏览器点它，手机上毫无反应。
 → 这是已知**功能限制**（工作区一般在电脑前就配好了）。要让手机能选目录，需要把 picker 钉成 `browse` 交互（cordis 组合层，未做）。
+
+**B20. 状态变化不一定产生可观察的 mutation。**
+DSH 0.1.7 开关右栏时**只改内联 `style`（transform）**，不改 class —— MutationObserver 用 `attributeFilter` 只盯 class/data-*，回调根本不触发，于是「关了右栏，汉堡按钮不回来」（实测踩过）。
+→ `attributeFilter` 要含 `style`；再加一个低频（800ms）兜底巡检，覆盖「改的是内部 state、DOM 完全没动」的情况。
+→ 前提是 **sync 必须幂等**：`setAttribute` 即使赋相同的值也会产生 mutation 记录，配兜底巡检会变成每帧自激的循环（所以要先比较再写）。
+
+**B21. 自动化点击要点「语义目标」，别点容器中心。**
+审计里 `row.click()` 点的是行**几何中心** —— 新版会话行中间挂着一个 `_iconButton`（操作按钮），于是命中了「排除 iconButton」的分支，表现成「选中后不自动收起」，白排查一轮（真因是审计点错位置，适配层没问题）。
+→ 点标题（`[class*="_title"]`）这类语义目标，点不到再退回容器。
 
 ## C. 跨平台
 
@@ -172,3 +192,8 @@ DOM 里更早的同名「设置」按钮是隐藏的，`.locator(...).first` 会
 **D14. 正则捕获类要排除 CJK 标点，否则会把中文注释吞进「路径用户名」。**
 `C:\Users\X、macOS 是 /Users/x。` 这种示意路径，用 `[^\\/\s]+` 捕获会得到「X、macOS」—— 误报，而且看着像真泄露。
 → 捕获类里排除 `、。，；：（）` 等 CJK 标点；再把 `X` / `x` / `user` 这类示意名加白名单。**闸门自身的误报也要修**，否则会被 `--no-verify` 绕过而形同虚设。
+
+**D15. 用会自动跟随重定向的 HTTP 客户端测鉴权，会把 303 误读成 401。**
+`urllib.request.urlopen` 默认跟随跳转：请求 `/?token=…` 时代理先回 `303` 换 Cookie，客户端**自动跟到 `/` 且不再带 token** → 得到 `401`，看起来像「令牌通道坏了」，白排查一轮。
+→ 测状态码要禁跟随（`HTTPRedirectHandler.redirect_request → None`，或 `curl` 不加 `-L`）；要测最终页面才跟随。
+→ 另外 `Get-Content` 用 GBK 读 UTF-8 日志会把中文显示成乱码（`涓嶅彲鐢?`），**别据此判断文件坏了** —— 用 `python -c "open(..., encoding='utf-8')"` 或 `-Encoding utf8` 复核（见 [D1](#d-工具与流程)）。

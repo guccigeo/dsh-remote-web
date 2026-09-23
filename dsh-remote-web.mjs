@@ -28,6 +28,7 @@ import { readFileSync, appendFileSync, existsSync, statSync } from 'node:fs'
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -57,28 +58,122 @@ if (typeof token !== 'string' || token.length < 16) {
 if (cookieDays > 30) throw new Error('remote.config.json: cookieDays 不能超过 30（DSH 默认 cookieMaxAgeDays）')
 
 /**
- * 上游 DSH 的 host:port。
- * 顺序：配置里的 upstream → 环境变量 DSH_WEB_URL（DSH 会把它注入 shell 环境；
- * macOS 上端口不一定和 Windows 一致，从 DSH 里启动代理时这个最准）→ 默认值。
+ * 上游 DSH 的 host:port —— **动态解析**，不是启动时写死。
+ *
+ * 为什么必须动态：DSH 的 Web 端口是动态的（实测重启后从 19387 变成 3080），
+ * 写死配置的话 DSH 每重启一次远程入口就 502 一次。策略：
+ *   1. 首选候选：配置里的 upstream、环境变量 DSH_WEB_URL（从 DSH 的 shell 里启动代理时能拿到）；
+ *   2. 首选连不上：扫本机处于 LISTEN 的端口 + 常见端口，用 DSH 的特征响应把它认出来；
+ *   3. 端口一旦变化就切过去 —— cookie 名与内容都绑定 authority，所以会自动重签。
  */
-function resolveUpstream(configured) {
-  if (typeof configured === 'string' && configured.trim() !== '') return configured.trim()
-  const fromEnv = process.env.DSH_WEB_URL
-  if (typeof fromEnv === 'string' && fromEnv !== '') {
-    try {
-      const url = new URL(fromEnv)
-      if (url.port !== '') return `${url.hostname}:${url.port}`
-    } catch {
-      /* 非法值就当没设 */
-    }
-  }
-  return '127.0.0.1:19387'
+const DSH_SIGNATURE = 'dsh web authentication required'
+
+function normalizeHostPort(value) {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  const raw = value.trim().replace(/^https?:\/\//u, '').split('/')[0]
+  const [host, port] = raw.split(':')
+  if (!host || !port || !/^\d+$/u.test(port)) return null
+  return `${host}:${port}`
 }
 
-const UPSTREAM = resolveUpstream(upstream)
-const [UPSTREAM_HOST, UPSTREAM_PORT] = UPSTREAM.split(':')
-const UPSTREAM_AUTHORITY = `${UPSTREAM_HOST}:${UPSTREAM_PORT}` // 同时用作 Host 与 cookie 的 audience
-const UPSTREAM_ORIGIN = `http://${UPSTREAM_AUTHORITY}`
+/** 配置里显式写的、或 DSH 注入环境变量给的首选上游（可能已经过期）。 */
+function preferredUpstream() {
+  return normalizeHostPort(upstream) ?? normalizeHostPort(process.env.DSH_WEB_URL ?? '')
+}
+
+let upstreamState = (() => {
+  const first = preferredUpstream() ?? '127.0.0.1:19387'
+  const [host, port] = first.split(':')
+  return { host, port, authority: first, origin: `http://${first}` }
+})()
+
+/** 切换上游。返回是否真的变了（变了就要重签 cookie，见 currentDshCookie）。 */
+function setUpstream(hostPort, why) {
+  const [host, port] = hostPort.split(':')
+  const authority = `${host}:${port}`
+  if (upstreamState.authority === authority) return false
+  upstreamState = { host, port, authority, origin: `http://${authority}` }
+  log(`upstream 切换为 ${authority}${why ? `（${why}）` : ''}`)
+  return true
+}
+
+/** 本机处于 LISTEN 的端口。跨平台：Windows 用 netstat，其它优先 ss。失败返回空数组。 */
+function listenPorts() {
+  const runs = process.platform === 'win32'
+    ? [['netstat', ['-ano', '-p', 'tcp']]]
+    : [['ss', ['-ltn']], ['netstat', ['-an', '-p', 'tcp']]]
+  const ports = new Set()
+  for (const [cmd, args] of runs) {
+    try {
+      const out = spawnSync(cmd, args, { encoding: 'utf8', timeout: 4000 })
+      if (out.status !== 0 || typeof out.stdout !== 'string') continue
+      for (const m of out.stdout.matchAll(/(?:127\.0\.0\.1|0\.0\.0\.0|\*|\[::1?\]):(\d{2,5})/gmu)) {
+        ports.add(Number(m[1]))
+      }
+      if (ports.size > 0) break
+    } catch {
+      /* 该命令不存在就试下一个 */
+    }
+  }
+  return [...ports]
+}
+
+/** 候选上游，按可信度排序。 */
+function upstreamCandidates() {
+  const out = []
+  const push = (value) => {
+    const normalized = normalizeHostPort(value)
+    if (normalized !== null && !out.includes(normalized) && !normalized.endsWith(`:${listenPort}`)) out.push(normalized)
+  }
+  push(preferredUpstream())
+  push(upstreamState.authority)
+  for (const port of listenPorts()) push(`127.0.0.1:${port}`)
+  for (const port of [3080, 19387, 19388, 19389, 3000, 8080]) push(`127.0.0.1:${port}`)
+  return out
+}
+
+/** 探测 host:port 是不是 DSH 的 Web 服务：GET / 应回 401 且带 DSH 那句固定文案。 */
+function probeUpstream(hostPort, timeoutMs = 800) {
+  return new Promise((resolve) => {
+    const [host, port] = hostPort.split(':')
+    const req = httpRequest(
+      { host, port: Number(port), path: '/', method: 'GET', timeout: timeoutMs, headers: { host: hostPort } },
+      (res) => {
+        let body = ''
+        res.setEncoding('utf8')
+        res.on('data', (chunk) => {
+          if (body.length < 2048) body += chunk
+        })
+        res.on('end', () => resolve(res.statusCode === 401 && body.includes(DSH_SIGNATURE)))
+      }
+    )
+    req.on('timeout', () => {
+      req.destroy()
+      resolve(false)
+    })
+    req.on('error', () => resolve(false))
+    req.end()
+  })
+}
+
+let lastDiscoverAt = 0
+
+/** 找出真正的 DSH 上游并切过去。返回是否找到。3 秒去抖，避免一串失败请求把探测打爆。 */
+async function discoverUpstream(why) {
+  const now = Date.now()
+  if (now - lastDiscoverAt < 3000) return false
+  lastDiscoverAt = now
+  const candidates = upstreamCandidates()
+  // 并发探测（串行时 20+ 个候选要 6 秒以上，DSH 重启后第一次访问会干等）
+  const results = await Promise.all(candidates.map((candidate) => probeUpstream(candidate)))
+  const hit = candidates.find((candidate, index) => results[index] === true)
+  if (hit === undefined) {
+    log(`upstream 探测失败：${candidates.length} 个候选里没有 DSH（${why}）`)
+    return false
+  }
+  if (!setUpstream(hit, why)) log(`upstream 确认仍是 ${hit}（${why}）`)
+  return true
+}
 const COOKIE_MAX_AGE_SECONDS = Math.round(cookieDays * 86400)
 const LOG_PATH = join(HERE, accessLog)
 
@@ -180,17 +275,21 @@ function refreshSession() {
   }
 }
 
-/** 签发（或复用）上游要用的 DSH cookie。剩余寿命 < 5 天时重新签发。 */
+/** 签发（或复用）上游要用的 DSH cookie。剩余寿命 < 5 天、或上游 authority 变了就重签。 */
 function currentDshCookie() {
   const now = Date.now()
-  if (dshCookie !== null && dshCookie.expiresAt - now > 5 * 86400_000) return dshCookie.header
+  const authority = upstreamState.authority
+  if (dshCookie !== null && dshCookie.authority === authority && dshCookie.expiresAt - now > 5 * 86400_000) {
+    return dshCookie.header
+  }
   const issuedAt = now
   const expiresAt = issuedAt + cookieDays * 86400_000
-  const name = 'dsh-auth-' + b64url(createHash('sha256').update(UPSTREAM_AUTHORITY).digest())
-  const body = b64url(Buffer.from(JSON.stringify({ version: 1, authority: UPSTREAM_AUTHORITY, issuedAt, expiresAt }), 'utf8'))
+  // cookie 名与 body 都绑定 authority —— 上游端口一变就必须重签，否则 DSH 会拒
+  const name = 'dsh-auth-' + b64url(createHash('sha256').update(authority).digest())
+  const body = b64url(Buffer.from(JSON.stringify({ version: 1, authority, issuedAt, expiresAt }), 'utf8'))
   const sig = b64url(createHmac('sha256', session.secret).update(body).digest())
-  dshCookie = { header: `${name}=v1.${body}.${sig}`, expiresAt }
-  log(`minted DSH session cookie for ${UPSTREAM_AUTHORITY}, valid ${cookieDays}d`)
+  dshCookie = { header: `${name}=v1.${body}.${sig}`, expiresAt, authority }
+  log(`minted DSH session cookie for ${authority}, valid ${cookieDays}d`)
   return dshCookie.header
 }
 
@@ -256,9 +355,9 @@ function upstreamHeaders(req) {
   }
   // 请求体：有 content-length 就保留；分块传输则交给 Node 自己重新分块
   if (headers['content-length'] === undefined) delete headers['transfer-encoding']
-  headers.host = UPSTREAM_AUTHORITY
-  if (headers.origin !== undefined) headers.origin = UPSTREAM_ORIGIN
-  if (typeof headers.referer === 'string') headers.referer = headers.referer.replace(/^https?:\/\/[^/]+/u, UPSTREAM_ORIGIN)
+  headers.host = upstreamState.authority
+  if (headers.origin !== undefined) headers.origin = upstreamState.origin
+  if (typeof headers.referer === 'string') headers.referer = headers.referer.replace(/^https?:\/\/[^/]+/u, upstreamState.origin)
   // 要改写 index.html 就得拿到明文：只对文档导航关掉压缩，
   // 静态资源（JS/CSS 几百 KB）继续走 gzip。
   if (mobileEnhance && typeof headers.accept === 'string' && headers.accept.includes('text/html')) {
@@ -276,11 +375,11 @@ function responseHeaders(upstreamRes) {
   return headers
 }
 
-function proxyHttp(req, res, url) {
+async function proxyHttp(req, res, url, retried = false) {
   const upstreamReq = httpRequest(
     {
-      host: UPSTREAM_HOST,
-      port: Number(UPSTREAM_PORT),
+      host: upstreamState.host,
+      port: Number(upstreamState.port),
       method: req.method,
       path: url.pathname + url.search,
       headers: upstreamHeaders(req)
@@ -327,14 +426,27 @@ function proxyHttp(req, res, url) {
       upstreamRes.pipe(res)
     }
   )
-  upstreamReq.on('error', (error) => {
+  upstreamReq.on('error', async (error) => {
     log(`upstream error: ${error.message}`)
+    // 连不上上游，多半是 DSH 重启后换了端口：探测一次再重试。
+    // 只重试「没有请求体」的请求（GET/HEAD 等），否则重发会把 body 丢掉。
+    const bodyless =
+      req.method === 'GET' ||
+      req.method === 'HEAD' ||
+      (req.headers['content-length'] === undefined && req.headers['transfer-encoding'] === undefined)
+    if (!retried && bodyless && (await discoverUpstream(`连接失败：${error.message}`)) && !res.headersSent) {
+      proxyHttp(req, res, url, true)
+      return
+    }
     if (res.headersSent) {
       res.destroy()
       return
     }
     res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
-    res.end(`dsh-remote-web: 连不上上游 DSH（${UPSTREAM_AUTHORITY}）：${error.message}\n请确认 DSH 正在运行。\n`)
+    res.end(
+      `dsh-remote-web: 连不上上游 DSH（${upstreamState.authority}）：${error.message}\n` +
+        '如果 DSH 刚重启过，代理会自动探测它的新端口；仍失败就重启代理进程（start-all.bat / ./mac/start.sh）。\n'
+    )
   })
   req.pipe(upstreamReq)
   res.on('close', () => upstreamReq.destroy())
@@ -342,11 +454,11 @@ function proxyHttp(req, res, url) {
 
 // ── WebSocket / 任意 upgrade：原样双向管道（DSH 的 /api/remote.mux 走这里）──
 function proxyUpgrade(req, socket, head) {
-  const headers = { ...req.headers, host: UPSTREAM_AUTHORITY, cookie: currentDshCookie() }
+  const headers = { ...req.headers, host: upstreamState.authority, cookie: currentDshCookie() }
   delete headers.authorization
-  if (headers.origin !== undefined) headers.origin = UPSTREAM_ORIGIN
+  if (headers.origin !== undefined) headers.origin = upstreamState.origin
 
-  const upstreamSocket = netConnect(Number(UPSTREAM_PORT), UPSTREAM_HOST, () => {
+  const upstreamSocket = netConnect(Number(upstreamState.port), upstreamState.host, () => {
     let raw = `${req.method} ${req.url} HTTP/1.1\r\n`
     for (const [key, value] of Object.entries(headers)) {
       if (Array.isArray(value)) for (const item of value) raw += `${key}: ${item}\r\n`
@@ -360,6 +472,8 @@ function proxyUpgrade(req, socket, head) {
   })
   const fail = (error) => {
     log(`upgrade error: ${error.message}`)
+    // WebSocket 不好中途重试（握手已完成），这里只探测新端口，让下一次连接用对
+    void discoverUpstream(`upgrade 连接失败：${error.message}`)
     socket.destroy()
     upstreamSocket.destroy()
   }
@@ -425,9 +539,17 @@ server.on('error', (error) => {
   process.exitCode = 1
 })
 
-server.listen(listenPort, listenHost, () => {
-  log(`dsh-remote-web listening on http://${listenHost}:${listenPort} -> ${UPSTREAM_ORIGIN}`)
+server.listen(listenPort, listenHost, async () => {
+  log(`dsh-remote-web listening on http://${listenHost}:${listenPort}`)
   log(`DSH home: ${dshHome}`)
   if (publicBaseUrl !== '') log(`public entry (via tunnel): ${publicBaseUrl}/?token=<token>`)
-  currentDshCookie() // 启动即签发一次，早点暴露配置错误
+  // 首选上游探一下：DSH 的端口是动态的，过期了就在这里换掉（否则第一次访问会 502）
+  const preferred = upstreamState.authority
+  if (await probeUpstream(preferred)) {
+    log(`upstream 可用：${preferred}`)
+  } else {
+    log(`upstream ${preferred} 不可用，开始探测 DSH 的真实端口…`)
+    await discoverUpstream('启动时首选上游不可用')
+  }
+  currentDshCookie() // 用最终确定的 authority 签发一次，早点暴露配置错误
 })

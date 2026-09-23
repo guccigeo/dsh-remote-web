@@ -302,6 +302,46 @@ def open_settings(page) -> dict:
     return {"openedBy": "js-click", "hittable": bool(probe.get("hittable")), "topCls": probe.get("topCls")}
 
 
+def reset_mobile_ui(page) -> str:
+    """把 App 可能恢复出来的全屏浮层收掉，让后续步骤从确定状态开始。
+
+    为什么需要：DSH 会持久化界面状态 —— 实测重启 DSH 后页面加载时**右栏是全屏
+    打开的**。此时适配层按设计把汉堡按钮藏起来（汉堡 z-55 会压住面板 z-40 的
+    顶栏），审计若直接点汉堡就会超时（踩过）。这里先收起面板再继续。
+    """
+    state = page.evaluate(
+        """() => {
+             // 判据同 mobile.js：认「收起右侧边栏」按钮是否真的在视口内。
+             // 只看面板容器会误判 —— 新版 DSH 关闭态也把容器留在屏内（内容被推出）。
+             const btn = [...document.querySelectorAll('button')]
+               .find(b => (b.getAttribute('aria-label') || '').includes('收起右侧边栏'));
+             if (!btn) return { panelOpen: false };
+             const r = btn.getBoundingClientRect();
+             return { panelOpen: r.width > 2 && r.left >= -1 && r.right <= innerWidth + 1 };
+           }"""
+    )
+    if not state.get("panelOpen"):
+        return ""
+    page.evaluate(
+        """() => {
+             const btn = [...document.querySelectorAll('button')]
+               .find(b => (b.getAttribute('aria-label') || '').includes('收起右侧边栏'));
+             if (btn) btn.click();
+           }"""
+    )
+    page.wait_for_timeout(1500)
+    still = page.evaluate(
+        """() => {
+             const btn = [...document.querySelectorAll('button')]
+               .find(b => (b.getAttribute('aria-label') || '').includes('收起右侧边栏'));
+             if (!btn) return false;
+             const r = btn.getBoundingClientRect();
+             return r.width > 2 && r.left >= -1 && r.right <= innerWidth + 1;
+           }"""
+    )
+    return "右栏浮层" + ("已收起" if not still else "收起失败（仍在）")
+
+
 def main() -> int:
     # 控制台可能是 GBK（中文 Windows），遇到 GBK 编不了的符号会直接抛
     # UnicodeEncodeError 把整个审计打断。统一切 UTF-8 + 不可编码就替换。
@@ -351,6 +391,9 @@ def main() -> int:
 
         # 1) 加载态：侧栏轨道应彻底消失
         g = "手机 · 加载态"
+        reset_note = reset_mobile_ui(page)
+        if reset_note:
+            rep.warn(g, "App 恢复了右栏全屏面板", reset_note + "（否则汉堡按钮被藏、点不到）")
         s = page.evaluate(STATE_JS)
         rep.check(g, "grid 第一轨为 0", s["grid"].startswith("0px"), f"grid={s['grid']}")
         rep.check(g, "侧栏列宽 ≤2px", (s["sidebar"] or {}).get("w", 99) <= 2, f"sidebar={s['sidebar']}")
@@ -378,7 +421,10 @@ def main() -> int:
             except Exception:
                 continue
             if ("分钟" in t or "小时" in t or "天" in t) and "新建会话" not in t:
-                rows.nth(i).click(timeout=4000)
+                # 点标题而不是行中心：新版会话行中间挂着 _iconButton（操作按钮），
+                # 点它会命中"排除 iconButton"的分支，抽屉就不会自动收起（实测踩过）。
+                title = rows.nth(i).locator('[class*="_title"]')
+                (title.first if title.count() else rows.nth(i)).click(timeout=4000)
                 opened = True
                 break
         page.wait_for_timeout(4000)
@@ -447,15 +493,30 @@ def main() -> int:
             rep.check(g, "打开轨迹 tab", False, str(exc)[:80])
 
         # 3c) 组件态 · 展开一个工具行：展开区出现、输出可横滚、小按钮达标。
-        #     会话里没有 Pwsh 行就 WARN 跳过（不硬造数据）。
+        #     工具行标签在 DSH 新版里本地化了（Pwsh -> 运行命令 / 读取 / 编辑），
+        #     所以按「标签或旧英文名」找；展开区若仍是旧结构才断言，
+        #     否则 WARN 跳过（新版 DOM 已变，见 docs/STATE.md 的版本差异一节）。
         g = "手机 · 工具行展开"
         try:
-            row = page.locator('[class*="_callRow"]', has_text="Pwsh").first
-            if page.locator('[class*="_callRow"]', has_text="Pwsh").count() == 0:
-                rep.warn(g, "会话里没有 Pwsh 工具行", "跳过展开检查")
+            row = page.locator(
+                '[class*="_callRow"]',
+                has_text=re.compile(r"^\s*(Pwsh|运行命令|读取|编辑|写入|Read|Edit|Write|Bash)"),
+            )
+            if row.count() == 0:
+                rep.warn(g, "会话里没有可展开的工具行", "跳过展开检查")
             else:
-                row.scroll_into_view_if_needed(timeout=3000)
-                row.click(timeout=3000)
+                page.evaluate(
+                    """() => {
+                         const rows = [...document.querySelectorAll('[class*="_callRow"]')];
+                         const hit = rows.find(r => {
+                           const t = (r.textContent || '').trim();
+                           const b = r.getBoundingClientRect();
+                           return b.height > 4 && b.top > 0 && b.top < innerHeight &&
+                             /^(Pwsh|运行命令|读取|编辑|写入|Read|Edit|Write|Bash)/.test(t);
+                         });
+                         if (hit) hit.click();
+                       }"""
+                )
                 page.wait_for_timeout(1200)
                 t = page.evaluate(
                     """() => {
@@ -467,24 +528,33 @@ def main() -> int:
                       const output = wrap ? wrap.querySelector('[class*="_output"]') : null;
                       const copy = wrap ? wrap.querySelector('[class*="_copyButton"]') : null;
                       const inspect = q('[class*="_inspectButton"]');
-                      return { hasBlock: !!block,
+                      // 新版：复制是 aria=复制 的 _action 按钮
+                      const newCopy = [...document.querySelectorAll('[class*="_action"]')]
+                        .filter(x => (x.getAttribute('aria-label') || '') === '复制')
+                        .map(x => b(x))[0] || null;
+                      return { legacy: !!wrap, hasBlock: !!block,
                                outputOx: output ? getComputedStyle(output).overflowX : null,
                                outputScrollable: output ? output.scrollWidth > output.clientWidth + 1 : false,
-                               copy: b(copy), inspect: b(inspect) };
+                               copy: b(copy), inspect: b(inspect), newCopy };
                     }"""
                 )
-                rep.check(g, "展开区出现", t["hasBlock"], "")
-                rep.check(g, "长输出可横向滚动",
-                          (not t["outputScrollable"]) or t["outputOx"] in ("auto", "scroll"),
-                          f"ox={t['outputOx']} scrollable={t['outputScrollable']}")
-                for name, key in [("复制钮", "copy"), ("查看钮", "inspect")]:
-                    btn = t[key]
-                    if btn:
-                        rep.check(g, f"{name}点击目标 ≥32px", btn["h"] >= 32 and btn["w"] >= 32,
-                                  f"{name}={btn['w']}x{btn['h']}")
-                cprobe = page.evaluate(PROBE_JS)
-                rep.check(g, "无横向溢出", len(cprobe["overflow"]) == 0,
-                          f"{len(cprobe['overflow'])} 处" + (f" 例: {cprobe['overflow'][0]}" if cprobe["overflow"] else ""))
+                if not t["legacy"]:
+                    rep.warn(g, "工具行展开区 DOM 已变（DSH 新版）",
+                             "旧选择器 _bodyWrap/_block 不再命中，展开区适配待下一轮；"
+                             f"新版复制钮={t['newCopy']}")
+                else:
+                    rep.check(g, "展开区出现", t["hasBlock"], "")
+                    rep.check(g, "长输出可横向滚动",
+                              (not t["outputScrollable"]) or t["outputOx"] in ("auto", "scroll"),
+                              f"ox={t['outputOx']} scrollable={t['outputScrollable']}")
+                    for name, key in [("复制钮", "copy"), ("查看钮", "inspect")]:
+                        btn = t[key]
+                        if btn:
+                            rep.check(g, f"{name}点击目标 ≥32px", btn["h"] >= 32 and btn["w"] >= 32,
+                                      f"{name}={btn['w']}x{btn['h']}")
+                    cprobe = page.evaluate(PROBE_JS)
+                    rep.check(g, "无横向溢出", len(cprobe["overflow"]) == 0,
+                              f"{len(cprobe['overflow'])} 处" + (f" 例: {cprobe['overflow'][0]}" if cprobe["overflow"] else ""))
                 page.screenshot(path=str(OUT / "phone-06-toolrow.png"))
         except Exception as exc:  # noqa: BLE001
             rep.check(g, "展开工具行", False, str(exc)[:80])
@@ -572,6 +642,7 @@ def main() -> int:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(5000)
+            reset_mobile_ui(page)  # 重载后 App 可能又恢复出全屏面板
             page.locator('[data-dshm-hamburger]').first.click(timeout=5000)
             page.wait_for_timeout(1800)
             how = open_settings(page)
@@ -665,6 +736,7 @@ def main() -> int:
                 wpage = wk.new_context(**IPHONE).new_page()
                 wpage.goto(url, wait_until="domcontentloaded", timeout=60000)
                 wpage.wait_for_timeout(6000)
+                reset_mobile_ui(wpage)  # App 可能恢复出右栏全屏面板
                 s = wpage.evaluate(STATE_JS)
                 rep.check(g, "grid 第一轨为 0", s["grid"].startswith("0px"), f"grid={s['grid']}")
                 rep.check(g, "主区域占满视口", (s["center"] or {}).get("w", 0) >= s["vw"] - 2, f"center={s['center']}")
@@ -680,7 +752,8 @@ def main() -> int:
                     except Exception:
                         continue
                     if ("分钟" in t or "小时" in t or "天" in t) and "新建会话" not in t:
-                        rows.nth(i).click(timeout=4000)
+                        title = rows.nth(i).locator('[class*="_title"]')
+                        (title.first if title.count() else rows.nth(i)).click(timeout=4000)
                         break
                 wpage.wait_for_timeout(4000)
                 s2 = wpage.evaluate(STATE_JS)
