@@ -6,7 +6,7 @@
 # Fallback: a best-effort command-line sweep via Get-CimInstance, which is
 #   denied in some restricted contexts, so its failure is not fatal.
 #
-# Only this feature's processes are touched; the bot panel's 17932 tunnel is
+# Only this feature's processes are touched; other tunnels are
 # left alone.
 # ASCII-only on purpose: these files may be read under a non-UTF-8 codepage.
 $here = $PSScriptRoot

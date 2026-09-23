@@ -103,7 +103,7 @@ WebSocket（DSH 流式走 `/api/remote.mux`，不是 SSE）也在本地验证过
 |---|---|---|
 | **macOS 真机** | 中 | `sh -n` 语法通过、隧道参数推导正确（`root@<服务器IP> 17933 19390`），但 `ssh -R` 与 LaunchAgent 必须在 Mac 上跑一次才算数 |
 | **iOS Safari 真机** | 低-中 | **WebKit 引擎冒烟已过**（`--webkit`，7 项：390px 视口、16px 输入框、抽屉收起、正文列 356px、无溢出）；但地址栏/手势条的真实伸缩行为只有真机准 |
-| **明文 HTTP** | 中 | 手机↔服务器是明文传令牌（与 bot 面板同款）。野 WiFi 有嗅探风险；消除需上 HTTPS |
+| **明文 HTTP** | 中 | 手机↔服务器是明文传令牌。野 WiFi 有嗅探风险；消除需上 HTTPS |
 | **DSH 升级** | 低-中 | 适配层靠 DOM 契约。升级后跑一次审计即可发现（契约断言的用途） |
 | **Windows 与 Mac 同时启动** | 低 | 会抢远端端口 17933，后启动的一方 `ExitOnForwardFailure` 失败后进重试循环 |
 
@@ -113,9 +113,9 @@ WebSocket（DSH 流式走 `/api/remote.mux`，不是 SSE）也在本地验证过
 |---|---|
 | 中转服务器 | `<你的服务器IP>`（自建 Linux，SSH key 见 `remote.config.json` 的 `tunnel.identityFile`） |
 | 公网端口 | `17933/tcp` |
-| 端口放行 | firewalld ✅ + **阿里云安全组 ✅（你手工加的）** |
-| sshd | `GatewayPorts clientspecified` 已配（bot 项目遗留，第 151 行） |
-| 该服务器安全组实际放行 | `22 / 80 / 443 / 10025 / 17932`（+ 本次加的 17933） |
+| 端口放行 | firewalld + **云安全组**（两层都要放行；安全组 SSH 改不了） |
+| sshd | 需要 `GatewayPorts clientspecified`（否则 `-R` 只绑到 127.0.0.1） |
+| 云安全组实际放行 | 以自己服务器为准（本项目默认用 `17933/tcp`） |
 | DSH GUI 端口 | Windows 实测 `127.0.0.1:19387`（**Mac 上可能不同**） |
 | 代理监听 | `127.0.0.1:19390` |
 | 隧道 | `本机 19390 → 服务器 0.0.0.0:17933` |
@@ -148,7 +148,7 @@ DSH 启动时**硬拒绝** `0.0.0.0`（理由：会把 RCE 暴露到网络），
 
 1. **真机 iPhone Safari 打开一次**（引擎级已由 `--webkit` 覆盖，真机只差地址栏/手势条实感）与**真机安卓各滑一遍手势**。
 2. **在 Mac 上跑通一遍**（`./mac/start.sh` + `./mac/autostart.sh install`），把 [5.3](#53-未验证--风险) 里的 macOS 项划掉。
-3. **决定是否上 HTTPS**：需要先加一条 DNS A 记录（如 `dsh.example.com` → `<你的服务器IP>`），然后宝塔建站 + Let's Encrypt + nginx 反代（WebSocket 与 SSE 的 nginx 配置见 README §七）。
+3. **决定是否上 HTTPS**：需要先加一条 DNS A 记录（如 `dsh.example.com` → `<你的服务器IP>`），然后在服务器上建站 + Let's Encrypt + nginx 反代（WebSocket 与 SSE 的 nginx 配置见 README §七）。
 4. 外观细节只剩 [5.2](#52-外观细节--功能限制) 的 1（交付物卡）和 4（环形指标）——都要等真实场景出现再量，别盲改。
 5. 可选：给仓库加 gitee 远程（目前是纯本地仓库）。
 

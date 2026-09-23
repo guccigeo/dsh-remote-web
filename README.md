@@ -42,7 +42,7 @@ http://<你的服务器IP>:17933/?token=<你的令牌>
                                                     └─ 注入 DSH 会话 cookie ─▶ DSH GUI 127.0.0.1:19387
 ```
 
-和 bot 面板（`17932`）是同一套路，只是多了一个**代理**。代理存在的两个理由：
+和常见的「内网服务 + 反向隧道」面板是同一套路，只是多了一个**代理**。代理存在的两个理由：
 
 1. **DSH 故意不允许 `--host 0.0.0.0`**（启动时硬拒绝，理由是把 RCE 暴露到网络），`/api` 还有 Host/Origin 栅栏防 DNS rebinding。代理不绕过这些设计，而是把 Host/Origin 规范成 loopback 权威，由代理自己承担对外鉴权。
 2. **`dsh web` 打印的 `?token=` 是进程级的**，每次重启 DSH 就换，做不了手机书签。DSH 的浏览器会话 cookie 用的是 `~/.dsh/.credentials.yaml` 里**持久化**的签名密钥，代理读该密钥自行签发 cookie，所以对手机而言令牌是**长期稳定**的。
@@ -97,14 +97,14 @@ python tools/mobile-audit.py --webkit                        # 追加 WebKit iPh
 1. 停止进程（Windows `stop-all.bat` / macOS `./mac/stop.sh`）
 2. Windows：删掉启动文件夹（`Win+R` → `shell:startup`）里的 `dsh_remote_web.vbs`；macOS：`./mac/autostart.sh uninstall`
 3. 服务器还原：`firewall-cmd --remove-port=17933/tcp --permanent && firewall-cmd --reload`
-4. 阿里云控制台删掉 17933 的安全组规则
+4. 云服务商控制台删掉 17933 的安全组规则
 5. 删掉本目录
 
 ## 五、安全边界（必读）
 
 DSH GUI 等价于**本机 RCE 能力**（能跑任意命令、读任意文件）。所以：
 
-- **手机 ↔ 阿里云这一段是明文 HTTP + 令牌**（与 bot 面板同款）。在不可信 WiFi 下令牌可能被嗅探。**要消除这个风险就上 HTTPS**（见第七节）。
+- **手机 ↔ 服务器这一段是明文 HTTP + 令牌**。在不可信 WiFi 下令牌可能被嗅探。**要消除这个风险就上 HTTPS**（见第七节）。
 - **PC ↔ 服务器这一段全程 SSH 加密**，复用 `~/.ssh/id_ed25519` 之类的已有密钥。
 - 代理只监听 `127.0.0.1:19390`，公网只能经隧道进来。
 - 令牌比对用 `timingSafeEqual`；Cookie 是 `HttpOnly; SameSite=Strict`，跨站请求带不上 Cookie，因此 CSRF 打不动。
@@ -156,11 +156,11 @@ chmod +x mac/*.sh
 
 ## 七、想升级成 HTTPS（可选）
 
-目前和 bot 一样是明文。要加密的话（推荐，且手机浏览器不会报证书警告）：
+目前是明文。要加密的话（推荐，且手机浏览器不会报证书警告）：
 
 1. DNS 加一条 A 记录，例如 `dsh.example.com` → `<你的服务器IP>`
-2. 宝塔建站 `dsh.example.com`，申请 Let's Encrypt 证书
-3. nginx 反代到隧道端口，注意三件事（宝塔默认配置都不满足）：
+2. 在服务器上建站（nginx 或面板工具均可），申请 Let's Encrypt 证书
+3. nginx 反代到隧道端口，注意三件事（默认配置都不满足）：
    - WebSocket 要 `proxy_http_version 1.1;` + `proxy_set_header Upgrade $http_upgrade;` + `proxy_set_header Connection "upgrade";`（DSH 的 `/api/remote.mux` 走 WS）
    - SSE 要 `proxy_buffering off;` + `proxy_read_timeout 600s;`
    - `proxy_set_header Host $host;` 保持原样即可（代理会把 Host 规范成 loopback）
