@@ -469,6 +469,48 @@ def main() -> int:
         rep.check(g, "汉堡按钮隐藏", not s3["burgerShown"], "")
         page.screenshot(path=str(OUT / "phone-03-drawer.png"))
 
+        # 3a) 行内操作按钮不得覆盖行主体 —— 触屏「点会话变归档」的真凶。
+        #     背景：hover 才显形的 _rowActions 被「侧栏按钮补到 44px」的规则撑大后，
+        #     占满整行右侧 152/256px，"归档会话"正好压在标题上；手机一按就触发粘滞
+        #     hover、按钮在手指底下冒出来。这里真实 hover 一行再逐点探测命中元素。
+        try:
+            rows_probe = page.locator('[class*="_sessionRow"]')
+            if rows_probe.count() > 0:
+                rows_probe.first.hover()
+                page.wait_for_timeout(600)
+            ar = page.evaluate(
+                """() => {
+                     const rows = [...document.querySelectorAll('[class*="_sessionRow"]')]
+                       .filter(r => r.getBoundingClientRect().height > 4);
+                     const row = rows[0];
+                     if (!row) return { noRow: true };
+                     const rb = row.getBoundingClientRect();
+                     const arch = row.querySelector('button[aria-label="归档会话"]');
+                     const ab = arch ? arch.getBoundingClientRect() : null;
+                     const y = Math.round(rb.y + rb.height / 2);
+                     const probe = [0.25, 0.5].map(f => {
+                       const x = Math.round(rb.x + rb.width * f);
+                       const el = document.elementFromPoint(x, y);
+                       const btn = el && el.closest ? el.closest('button') : null;
+                       return { at: f, top: btn ? (btn.getAttribute('aria-label') || 'button') : 'not-button' };
+                     });
+                     const actions = row.querySelector('[class*="_rowActions"]');
+                     const ax = actions ? actions.getBoundingClientRect() : null;
+                     return { noRow: false, archiveVisible: !!ab && ab.width > 2 && ab.height > 2,
+                              probe, actionsX: ax ? Math.round(ax.x) : null, rowW: Math.round(rb.width) };
+                   }"""
+            )
+            if ar.get("noRow"):
+                rep.warn(g, "抽屉里没有会话行", "跳过行内操作按钮检查")
+            else:
+                rep.check(g, "触屏上没有「一键归档」按钮", not ar["archiveVisible"],
+                          f"archiveVisible={ar['archiveVisible']}（会误触，必须为 False）")
+                bad = [p for p in ar["probe"] if p["top"] != "not-button"]
+                rep.check(g, "行内操作按钮不覆盖行主体", not bad,
+                          f"命中按钮: {bad}  操作区起点 x={ar['actionsX']} / 行宽 {ar['rowW']}")
+        except Exception as exc:  # noqa: BLE001
+            rep.check(g, "行内操作按钮检查", False, str(exc)[:80])
+
         # 3b) 轨迹 tab：payload 行原生就是「nowrap + 祖先 overflow:hidden 裁成省略号」，
         #     不算页面溢出（探针已含裁剪感知）。这里盯的是真正漏出去的元素。
         g = "手机 · 轨迹 tab"

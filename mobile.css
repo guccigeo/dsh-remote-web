@@ -436,6 +436,22 @@
     min-width: 44px;
   }
 
+  /* ⚠️ 但**行内操作按钮**（hover 才显形的 _rowActions）必须排除，否则会闯大祸：
+     它们被撑成 44×44 后，容器占满整行右侧 152/256px（59%），"归档会话"正好压在
+     标题/时间上；手机上一按就触发粘滞 hover、按钮在手指底下冒出来 —— 点会话
+     变成**归档会话**（真踩过，用户的会话就这么被归档的）。 */
+  [data-slot="root"] > [class*="_frame"] > [class*="_sidebarCol"] [class*="_rowActions"] button {
+    min-width: 0;
+    min-height: 0;
+  }
+
+  /* 触屏上彻底摘掉「一键归档」：它就在行内、与"点会话"是同一个落点，
+     误触代价又是破坏性的。置顶/操作（"…"菜单，里面再选归档是两步）保留。
+     恢复已归档会话：设置 → 取消归档会话。 */
+  [class*="_sessionRow"] button[aria-label="归档会话"] {
+    display: none !important;
+  }
+
   /* 表头只有 40px 高，放 44px 按钮会撑破布局；输入区按钮补到 40px */
   [class*="_header"] [class*="_iconButton"] {
     width: 36px !important;
