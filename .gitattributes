@@ -1,0 +1,7 @@
+# Windows 批处理 / VBS 用 CRLF：cmd.exe 对纯 LF 的 .bat（尤其是 goto 标签）处理不稳
+*.bat text eol=crlf
+*.vbs text eol=crlf
+*.ps1 text eol=crlf
+
+# 其余统一 LF，避免无谓的整文件 diff
+* text=auto eol=lf

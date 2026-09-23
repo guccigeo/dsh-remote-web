@@ -1,0 +1,20 @@
+{
+  "listenHost": "127.0.0.1",
+  "listenPort": 19390,
+  "upstream": "127.0.0.1:19387",
+  "publicBaseUrl": "http://<你的服务器IP>:17933",
+  "token": "<在这里填 32 字节随机令牌，例如 node -e \"console.log(require('crypto').randomBytes(32).toString('base64url'))\">",
+  "cookieDays": 29,
+  "cookieName": "dsh-remote",
+  "accessLog": "access.log",
+  "mobileEnhance": true,
+
+  "_说明_upstream": "可省略：省略时先读环境变量 DSH_WEB_URL，再退回 127.0.0.1:19387。macOS 上 DSH 端口不一定一致，从 DSH 里启动代理时留空最省事。",
+  "_说明_tunnel": "整段可省略：脚本会从 publicBaseUrl 推导 host/remotePort、从 listenPort 推导 localPort，密钥默认 ~/.ssh/id_ed25519。Windows（run-tunnel.ps1）与 mac/ 下的脚本都读这段。",
+  "tunnel": {
+    "host": "root@<你的服务器IP>",
+    "remotePort": 17933,
+    "localPort": 19390,
+    "identityFile": "~/.ssh/id_ed25519"
+  }
+}

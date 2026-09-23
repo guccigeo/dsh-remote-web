@@ -1,0 +1,22 @@
+# 真实配置含明文远程访问令牌 —— 绝不入库（照 AGENTS.md 坑#212 铁律）
+# 新环境：copy remote.config.example.json remote.config.json 后填自己的令牌
+remote.config.json
+
+# 运行期产物
+*.pid
+access.log
+access.log.*
+
+# mac/ 脚本的运行期日志
+*.out.log
+launcher.log
+launchd.*.log
+
+# 审计工具产出的截图
+tools/out/
+
+# 编辑器 / 系统
+*.tmp
+*.bak
+Thumbs.db
+desktop.ini

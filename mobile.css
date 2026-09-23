@@ -1,0 +1,455 @@
+/* ===========================================================================
+   DSH 移动端适配层 —— 由 dsh-remote-web 代理注入，只服务手机/平板访问。
+   桌面端不受影响（全部规则都在 media query 内）。
+
+   设计原则：不猜 hash 类名。
+     · 优先用 App 自己设的语义化属性（跨 DSH 升级稳定）：
+         [data-slot="root"]          布局 frame 的稳定包裹层
+         [data-sidebar-collapsed]    frame 上「左侧栏折叠中」才存在
+         [data-rightbar-collapsed]   frame 上「右侧面板折叠中」才存在
+     · 次选用 CSS-module 的 local 名做子串匹配（[class*="_sidebarCol"]），
+       hash 前缀每次 DSH 重建都会变，但 local 名不会。
+
+   要解决的核心问题：App 是桌面布局，左侧栏展开时靠 grid 轨道占宽
+   （内联 style 写死 grid-template-columns: 280px minmax(0,1fr) 0px），
+   在 393px 手机上把主区域挤成 113px —— 输入框每行只剩两个字。
+   这里把展开的侧栏改成「浮层抽屉」，主区域拿回整屏宽度。
+   =========================================================================== */
+
+/* 手机/竖屏平板：侧栏改为浮层 */
+@media (max-width: 720px) {
+  /* ---------------------------------------------------------------------
+     0. 手机上彻底收掉左侧图标轨道。
+        原生的「折叠态」是一个 56px 宽的图标轨道常驻占位 —— 420px 屏上吃掉
+        13% 宽度，而且刷新后 DSH 恢复上次会话时它必然出现。
+        这里把 grid 第一轨归零：sidebarCol 自带 overflow:hidden，轨宽 0 时
+        内容被裁掉；而里面的切换按钮仍在 DOM 里，可以被程序点击（HTMLElement
+        .click() 对不可见元素同样派发事件），供左上角汉堡按钮调用。
+        两个状态下都归零：折叠时藏轨道，展开时侧栏是 absolute 浮层（见第 1 条）。
+     --------------------------------------------------------------------- */
+  [data-slot="root"] > [class*="_frame"] {
+    grid-template-columns: 0 minmax(0, 1fr) auto !important;
+  }
+
+  /* 给汉堡按钮腾位置，免得压住会话标题/面包屑 */
+  [data-slot="root"] > [class*="_frame"] > [class*="_centerCol"] [class*="_titleRow"] {
+    padding-left: 46px !important;
+  }
+
+  /* 汉堡按钮（由 mobile.js 注入并控制显隐） */
+  [data-dshm-hamburger] {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 6px);
+    left: 6px;
+    width: 36px;
+    height: 36px;
+    z-index: 55;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 0.5px solid var(--dsw-alias-border-l3);
+    border-radius: 10px;
+    background: var(--dsw-alias-bg-layer-2, #fff);
+    color: var(--dsw-alias-label-primary, #111);
+    box-shadow: 0 1px 6px rgb(0 0 0 / 10%);
+    -webkit-tap-highlight-color: transparent;
+    cursor: pointer;
+  }
+
+  /* 抽屉打开时不需要汉堡按钮（遮罩本身就能关闭） */
+  [data-dshm-hamburger][hidden] {
+    display: none !important;
+  }
+
+  /* 注意：模态框（设置等）打开时也要藏汉堡按钮，但那件事**不能**用 CSS 做 ——
+     `html:has([class*="_overlay"])` 恒为真，因为设置对话框的 overlay 元素一直
+     存在于 DOM 里、只是隐藏着，结果会把汉堡按钮永久藏掉（真踩过）。
+     该判断在 mobile.js 的 hasOpenModal() 里按「实际尺寸 + visibility」做。 */
+
+  /* ---------------------------------------------------------------------
+     1. 展开的侧栏不再吃 grid 轨道宽度，改为绝对定位浮层。
+        grid-template-columns 是 React 写的内联样式，必须 !important 才能盖住。
+        第三轨保留 auto，右侧面板无论 fullscreen（fixed，贡献 0）还是
+        docked（在流内，按内容宽）都成立。
+     --------------------------------------------------------------------- */
+  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-collapsed]) > [class*="_sidebarCol"] {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(84vw, 320px);
+    /* 层级必须夹在「作曲家」与「App 自己的浮层」之间：
+         .WMSvqq_composerSeat 在 active 阶段是 position:sticky + z-index:7
+         （带触发器菜单时 9）—— 这是踩过的真 bug：抽屉原先用 z-index:5，
+         结果底部被作曲家盖住，真机点抽屉底部的「设置」会点到作曲家的指标行上。
+         所以背景遮罩 12、抽屉 15，都高于作曲家的 9；
+         而 App 的 .ONzo8q_overlayLayer 是 20（侧栏里弹出的菜单挂在那），
+         所以不能超过 20，否则菜单会被侧栏自己盖住。
+         右侧面板 fullscreen 时是 40，高于抽屉 —— 那是另一块独立面，符合预期。 */
+    z-index: 15;
+    box-shadow:
+      0 0 0 0.5px var(--dsw-alias-border-l3),
+      0 8px 32px rgb(0 0 0 / 18%);
+  }
+
+  /* 内层容器原本按 280px 定宽，跟着列宽走 */
+  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-collapsed]) > [class*="_sidebarCol"] > * {
+    width: 100% !important;
+  }
+
+  /* ---------------------------------------------------------------------
+     1b. 显式钉住三列各自的 grid 轨道。
+        坑：把侧栏设成 position:absolute 后它就退出了 grid 的自动排布，
+        剩下两个在流内的子元素会各自前移一轨 —— centerCol 跑去占第 1 轨
+        （宽 0），主区域反而变成 0 宽。必须显式指定 grid-column。
+     --------------------------------------------------------------------- */
+  [data-slot="root"] > [class*="_frame"] > [class*="_sidebarCol"] {
+    grid-column: 1;
+  }
+  [data-slot="root"] > [class*="_frame"] > [class*="_centerCol"] {
+    grid-column: 2;
+  }
+  [data-slot="root"] > [class*="_frame"] > [class*="_rightbarCol"] {
+    grid-column: 3;
+  }
+
+  /* ---------------------------------------------------------------------
+     2. 浮层打开时的背景遮罩（由 mobile.js 插入 [data-dshm-backdrop]）。
+        点遮罩 = 收起侧栏，这是手机上唯一符合直觉的关闭方式。
+     --------------------------------------------------------------------- */
+  [data-dshm-backdrop] {
+    position: absolute;
+    inset: 0;
+    /* 层级见下面抽屉那段的长注释 */
+    z-index: 12;
+    background: rgb(0 0 0 / 32%);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* ---------------------------------------------------------------------
+     3. iOS/Android 动态视口与安全区。
+        App 用 height:100%（= 小视口），Safari 地址栏/手势条会压住底部输入框。
+        100dvh 跟随真实可视高度；再给输入区留出 home indicator 的空间。
+     --------------------------------------------------------------------- */
+  html,
+  body,
+  #root {
+    height: 100dvh !important;
+  }
+
+  [class*="_composerSeat"] {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  /* 侧栏顶部避开刘海/状态栏 */
+  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-collapsed]) > [class*="_sidebarCol"] {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  /* ---------------------------------------------------------------------
+     4. 会话标题行：修横向重叠。
+        标题行是 flex 行：titleCluster(1 1 0%) + headerUtilities(0 0 auto)
+        + headerCorner(0 0 auto)。titleCluster 允许收缩，但它里面的
+        headerActions 是 flex:0 0 auto + min-width:auto —— **拒绝收缩**，
+        于是整体溢出父容器去压右侧图标组（393px 下实测横向压 55px）。
+
+        修法：让两个「文案」让位成图标（各自点开仍能看到完整名称，
+        aria-label 也保留），动作簇本身保持 0 0 auto 不裁切，
+        由会话标题去截断 —— 标题在侧栏和标签页里本来就有。
+        反面教材：给 headerActions 加 overflow:hidden 会把「标准模式」
+        裁成半个字，比重叠更难看。
+     --------------------------------------------------------------------- */
+  [class*="_titleCluster"] {
+    min-width: 0 !important;
+  }
+  [class*="_headerActions"] {
+    flex: 0 0 auto !important; /* 保持自然宽度，绝不裁切 */
+  }
+  /* 后台任务计数文案 */
+  [class*="_headerActions"] [class*="_count"] {
+    display: none !important;
+  }
+  /* 模式名文案：font-size:0 只吃掉文字，svg 图标有显式尺寸不受影响 */
+  [class*="_headerActions"] [class*="_label"] {
+    font-size: 0 !important;
+  }
+
+  /* ---------------------------------------------------------------------
+     5. 模态对话框（设置 / 插件 / Agent 预设 …）
+        桌面形态 = 居中卡片(372px) + 左右双栏(nav 188 / content 184)，
+        content 再减去 options 的 24px 内边距只剩 **136px** ——
+        中文标签只能逐字竖排（"权限选择新会话的默认权限模式"排成一条竖线）。
+        手机上改成：铺满全屏 + 顶部横向可滑标签条 + 内容整宽。
+        注意排除 `_overlayLayer`（App 自己的浮层容器，也含 "_overlay" 子串）。
+     --------------------------------------------------------------------- */
+  [class*="_overlay"]:not([class*="_overlayLayer"]) {
+    padding: 0 !important;
+  }
+  [class*="_overlay"]:not([class*="_overlayLayer"]) > [class*="_panel"] {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 100% !important;
+    max-height: 100% !important;
+    border-radius: 0 !important;
+    flex-direction: column !important; /* 双栏 -> 上下 */
+  }
+
+  /* 左导航 -> 顶部标签条（横向可滑） */
+  [class*="_overlay"]:not([class*="_overlayLayer"]) > [class*="_panel"] > [class*="_nav"] {
+    flex: 0 0 auto !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 8px !important;
+    width: 100% !important;
+    padding: 10px 12px !important;
+    overflow: hidden !important;
+    border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+  }
+  [class*="_overlay"]:not([class*="_overlayLayer"]) > [class*="_panel"] > [class*="_nav"] > [class*="_navTitle"] {
+    flex: 0 0 auto !important;
+  }
+  [class*="_overlay"]:not([class*="_overlayLayer"]) > [class*="_panel"] > [class*="_nav"] > [class*="_navList"] {
+    flex: 1 1 auto !important;
+    flex-direction: row !important;
+    min-width: 0 !important;
+    gap: 6px !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  [class*="_overlay"]:not([class*="_overlayLayer"]) > [class*="_panel"] > [class*="_nav"] > [class*="_navList"] > * {
+    flex: 0 0 auto !important;
+    white-space: nowrap !important;
+  }
+
+  /* 内容区拿回整屏宽度 */
+  [class*="_overlay"]:not([class*="_overlayLayer"]) > [class*="_panel"] > [class*="_content"] {
+    flex: 1 1 auto !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+  [class*="_overlay"]:not([class*="_overlayLayer"]) > [class*="_panel"] > [class*="_content"] > [class*="_options"] {
+    padding-left: 16px !important;
+    padding-right: 16px !important;
+  }
+
+  /* ---------------------------------------------------------------------
+     6. 正文列太窄 —— 这是「移动端太小」的主因。
+        消息滚动容器 .GrHszq_scroll 是 padding: 16px 32px，420px 屏上
+        正文只剩 290px（354 - 64）。左右各收到 12px 后正文拿到 330px（+14%），
+        宽表格、代码块、工具行都能多显示一截。
+
+        定位用「含 column 子元素的 scroll」：注意层级是 scroll(PARENT) >
+        column(CHILD)，一开始写反了。也不能只写 [class*="_scroll"]，
+        因为 WMSvqq_scrollBody 同样命中 —— 给那个加内边距会把整个滚动区
+        连同输入框一起内缩。
+     --------------------------------------------------------------------- */
+  [class*="_scroll"]:has(> [class*="_column"]) {
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+  }
+
+  /* ---------------------------------------------------------------------
+     7. 底部指标胶囊（"6 轮 226 步 · 144 tok/s"、"46M tok · 缓存命中 96%"）
+        结构：HOh3MW_root(flex row, gap 12) > _anchor > _pill > (svg + _label)
+        _label 被限宽到 76px，装不下 ~110px 文字，于是被 ellipsis 截断。
+
+        ⚠️ 反面教材（我自己先写错过一次）：只把 _label 改成 overflow:visible
+        会让文字**溢出胶囊、和相邻胶囊叠在一起**，比截断更糟 —— 这正好就是
+        用户反馈的"组件视觉重叠交叉"。
+        正确做法：让胶囊按内容宽度排 + 容器允许换行，label 仍然裁在胶囊内。
+     --------------------------------------------------------------------- */
+  [class*="_composerSeat"] :has(> [class*="_anchor"]) {
+    flex-wrap: wrap !important;
+    row-gap: 4px !important;
+  }
+  [class*="_composerSeat"] [class*="_anchor"],
+  [class*="_composerSeat"] [class*="_pill"] {
+    max-width: none !important;
+    flex: 0 0 auto !important;
+  }
+  [class*="_composerSeat"] [class*="_pill"] [class*="_label"] {
+    max-width: none !important;
+    overflow: hidden !important; /* 必须是 hidden：visible 会溢出重叠 */
+    text-overflow: clip !important;
+  }
+
+  /* ---------------------------------------------------------------------
+     8. 通用原语（菜单 / 模态 / 输入框 / 触屏死功能）
+     --------------------------------------------------------------------- */
+
+  /* 8a. 输入框字号补到 16px：iOS 对 <16px 的可聚焦输入框会自动放大页面，
+         实测 composer 输入框是 14px（DIV.sgwBQW_input）。只在窄屏生效。 */
+  [data-slot="root"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  [data-slot="root"] textarea,
+  [data-slot="root"] [contenteditable]:not([contenteditable="false"]) {
+    font-size: 16px !important;
+  }
+
+  /* 8b. 下拉菜单：卡高用 100dvh（iOS 的 100vh 含工具栏后方区域，偏高）；
+         宽度钳在视口内（模型列表等宽菜单的兜底，实测权限菜单 218px 本就放得下）。
+         选择器用「_list_ + _portal_ 双类名组合」精确定位 Menu 原语，
+         单写 [class*="_list"] 会误伤 todo/附件/工作区等一堆同名 list。 */
+  [class*="_list_"][class*="_portal_"] {
+    max-width: calc(100vw - 16px) !important;
+  }
+  [class*="_scrollable"] {
+    max-height: calc(100dvh - 24px) !important;
+  }
+
+  /* 8c. 模态框（Modal 原语：root > mask + dialog 兄弟结构）。
+         原生 dialog 无 max-height、body 无滚动 —— 内容一高就被 dialog 的
+         overflow:hidden 裁掉且无法滚动（反馈表单等）。root 内边距 24→12。 */
+  [class*="_root"]:has(> [class*="_mask"]):has(> [class*="_dialog"]) {
+    padding: 12px !important;
+  }
+  [class*="_mask"] ~ [class*="_dialog"] {
+    max-height: calc(100dvh - 24px) !important;
+  }
+  [class*="_mask"] ~ [class*="_dialog"] [class*="_body"] {
+    overflow-y: auto !important;
+    min-height: 0 !important;
+  }
+  [class*="_mask"] ~ [class*="_dialog"] [class*="_footer"] {
+    flex-wrap: wrap !important;
+    row-gap: 8px !important;
+  }
+
+  /* 8d. 宽表格在触屏上不能横向滚动（真 bug）：MarkdownText 给 .md-table-wide
+         设了 overflow-x:hidden，只在 :hover/:focus-visible 才放开成 scroll ——
+         触屏没有 hover、tableScroll 容器也不可聚焦，宽表格被永久裁掉。 */
+  [class*="_tableScroll"].md-table-wide {
+    overflow-x: auto !important;
+    padding-bottom: 0 !important;
+  }
+
+  /* ---------------------------------------------------------------------
+     8e. composer 文本最大高度跟随视口：原生写死 336px，在矮屏手机
+         （667px 档）会占掉半屏。min() 对大手机无影响（933px → 280px）。
+     --------------------------------------------------------------------- */
+  [class*="_composerSeat"] {
+    --dsh-composer-text-max-height: min(336px, 30dvh);
+  }
+
+  /* ---------------------------------------------------------------------
+     9. 行内卡片（diff / 审批）
+     --------------------------------------------------------------------- */
+
+  /* 9a. diff 对比视图双列 → 单列堆叠。原生是 grid: minmax(0,1fr) 两列，
+         420px 下每列只有 ~190px。「_columns」这个 local 名全前端只有
+         diff 模块在用（查过类名清单），子列自身的 overflow-x:auto 保留。 */
+  [class*="_columns"] {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  [class*="_columns"] > [class*="_column"] + [class*="_column"] {
+    border-left: none !important;
+    border-top: 0.5px solid var(--dsw-alias-border-l3);
+  }
+
+  /* 9b. 审批卡的按钮行允许换行（允许/拒绝/始终允许 三个按钮窄屏会挤）。
+         「_actionRow」只有审批模块在用。 */
+  [class*="_actionRow"] {
+    flex-wrap: wrap !important;
+    row-gap: 8px !important;
+  }
+}
+
+/* 触屏：展开的工具/技能卡里的小按钮补足点击目标。
+   实测：复制钮 26×18、查看钮 56×22，低于可用下限。 */
+@media (pointer: coarse) {
+  [class*="_bodyWrap"] [class*="_copyButton"],
+  [class*="_bodyWrap"] [class*="_inspectButton"] {
+    min-width: 32px;
+    min-height: 32px;
+  }
+
+  /* tooltip 是桌面 hover 的产物：触屏点击后的粘滞 hover 会让黑气泡一直挂着。
+     用 data-side 属性区分 Tooltip 的 _bubble 和聊天消息气泡（同名不同模块）。 */
+  [class*="_bubble"][data-side] {
+    display: none !important;
+  }
+
+  /* 标题行角落/工具簇按钮补到 36px（实测：右栏开关 28px、更多操作 28px、
+     后台任务触发器 31px）。标题行高 40px，36px 放得下。 */
+  [class*="_headerCorner"] button,
+  [class*="_headerUtilities"] button {
+    min-width: 36px;
+    min-height: 36px;
+  }
+
+  /* 右栏全屏面板顶栏按钮（分栏/退出全屏/收起 28px → 36px） */
+  [class*="_rightbarCol"] [class*="_iconButton"] {
+    min-width: 36px;
+    min-height: 36px;
+  }
+}
+
+/* 触屏专属（含 >720px 的平板/触屏本） */
+@media (pointer: coarse) {
+  /* 菜单子菜单原生固定向右弹（left: calc(100% + 10px)），420px 屏上必飞出
+     右缘。触屏改底部浮层。z-index 必须压过父菜单卡片的 1100。 */
+  [class*="_submenu"] {
+    position: fixed !important;
+    left: 8px !important;
+    right: 8px !important;
+    top: auto !important;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 8px) !important;
+    max-height: 60dvh !important;
+    overflow-y: auto !important;
+    z-index: 1101 !important;
+  }
+
+  /* hover 才显的控件在触屏上等于不存在，补常显：
+     - JsonTree 每行的复制钮（.row:hover > .copySlot 才 opacity:1）
+     - 聊天消息的动作行（非最新回合 data-actions-reveal="hover" 时 opacity:0；
+       最新回合本来就是 always，不受影响） */
+  [class*="_copySlot"] {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+  }
+  [data-actions-reveal="hover"] [class*="_actions"] {
+    opacity: 1 !important;
+  }
+}
+
+/* 触摸设备：隐藏侧栏拖拽改宽手柄。
+   它 touch-action:none，手指落在上面会吞掉滚动手势；手机也不需要拖宽。 */
+@media (pointer: coarse), (max-width: 720px) {
+  [data-slot="root"] > [class*="_frame"] > [class*="_handle"] {
+    display: none !important;
+  }
+}
+
+/* 触摸设备：点击目标补到可用的尺寸。
+   实测原尺寸只有 28–36px，低于 iOS 44px / Android 48dp 的建议值。
+   用 min-* 而不是 width/height，免得把「新建会话」这种整行按钮压回方形。 */
+@media (pointer: coarse) {
+  /* 侧栏（折叠轨道 + 展开抽屉）：纵向空间充足，统一补到 44px。
+     展开态尤其重要 —— 抽屉里每个会话行都是要点的。 */
+  [data-slot="root"] > [class*="_frame"] > [class*="_sidebarCol"] button {
+    min-height: 44px;
+  }
+  [data-slot="root"] > [class*="_frame"] > [class*="_sidebarCol"] button[class*="_iconButton"],
+  [data-slot="root"] > [class*="_frame"] > [class*="_sidebarCol"] button[class*="_panelRow"],
+  [data-slot="root"] > [class*="_frame"] > [class*="_sidebarCol"] button[class*="_trigger"] {
+    min-width: 44px;
+  }
+
+  /* 表头只有 40px 高，放 44px 按钮会撑破布局；输入区按钮补到 40px */
+  [class*="_header"] [class*="_iconButton"] {
+    width: 36px !important;
+    height: 36px !important;
+  }
+  [class*="_composerSeat"] [class*="_iconButton"] {
+    width: 40px !important;
+    height: 40px !important;
+  }
+
+  /* 会话行的 hover 预览卡是桌面形态：它按「行的右边缘」定位，在手机上会飞到
+     屏幕外（实测 right=520 / 视口 420）。触摸设备没有真正的 hover，而安卓点击
+     会留下粘滞 hover 态，所以直接不显示。 */
+  [class*="_hoverContent"] {
+    display: none !important;
+  }
+}
