@@ -386,6 +386,24 @@ def main() -> int:
             if name.startswith("_"):
                 continue
             rep.check(cg, name, bool(ok), "" if ok else "选择器没命中")
+        # 版本适配自检：打印当前跑的是哪套 hash / 哪套选择器，方便判断双版本兼容情况。
+        # 旧版 Electron 打包版布局壳 hash = ONzo8q；新版 npm 0.1.7 = EvIC1a（见 docs/MOBILE.md 第九节）。
+        fam = page.evaluate(
+            """() => {
+                 const f = document.querySelector('[data-slot="root"] > [class*="_frame"]');
+                 const m = f ? String(f.className).match(/^([A-Za-z0-9_-]+)_/) : null;
+                 return {
+                   frameHash: m ? m[1] : null,
+                   legacyToolRow: document.querySelectorAll('[class*="_bodyWrap"], [class*="_copyButton"]').length,
+                   modernCopy: [...document.querySelectorAll('[class*="_action"]')]
+                     .filter(b => (b.getAttribute('aria-label') || '') === '复制').length,
+                 };
+               }"""
+        )
+        print(f"[版本适配] 布局壳 hash={fam['frameHash']}"
+              f"（旧版 Electron=ONzo8q，新版 npm 0.1.7=pI_x6G）；"
+              f"工具行：旧版选择器 {fam['legacyToolRow']} 处 / 新版复制钮 {fam['modernCopy']} 处"
+              f"（加载态，工具行要开会话才出现）")
         rep.check(cg, "frame 状态属性", bool(contract.get("_frameAttrs")),
                   f"attrs={contract.get('_frameAttrs')}")
 

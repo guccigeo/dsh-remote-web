@@ -70,6 +70,8 @@ DSH index.html ──► 代理改写 <head> ──► 手机
 1. 优先用 App 自己设的**语义化属性**（跨版本最稳）；
 2. 次选用 local 名做子串匹配 `[class*="_sidebarCol"]`。
 
+> 这条策略已实测扛过两次版本变化（Electron 打包版 → npm `0.1.7-alpha.2`：hash 全换、端口变了，**契约断言依然全过**）。两版的差异清单见 [第九节 版本兼容矩阵](#九版本兼容矩阵旧版-electron--新版-npm-017)。
+
 | 锚点 | 选择器 | 用途 | 失效表现 |
 |---|---|---|---|
 | frame | `[data-slot="root"] > [class*="_frame"]` | 布局网格根 | **所有**布局规则失效 |
@@ -160,3 +162,26 @@ python tools/mobile-audit.py --keep-open        # 保留浏览器调试
 6. 若失败，先怀疑断言本身（[PITFALLS D2](PITFALLS.md)）。
 7. 截图肉眼确认一遍——数字对不代表好看。
 8. 提交，提交信息里写清「原状 → 修后」的实测数值。
+
+## 九、版本兼容矩阵（旧版 Electron ↔ 新版 npm 0.1.7）
+
+**结论：一套适配层同时兼容两个版本。** 原理是选择器只认 local 名与语义属性，所以 hash 全换（`ONzo8q` → `EvIC1a` 等）也不受影响；真正需要版本判断的地方都改成了「语义信号」而不是「结构猜测」。
+
+| 功能 | 旧版（Electron 打包） | 新版 `0.1.7-alpha.2`（npm） | 两版兼容性 |
+|---|---|---|---|
+| 布局壳 frame/sidebarCol/centerCol/rightbarCol | `ONzo8q_*` | `pI_x6G_*`（本机实测；聊天流是 `EvIC1a_*`，右栏面板 `P3OORG_*`） | ✅ 只认 local 名 |
+| 侧栏会话行 / 工作区行 | `_sessionRow` / `_projectRow` | 同 local 名（hash 变） | ✅ |
+| 侧栏收起按钮 | `button[class*="_toggle"]` | 同 | ✅ |
+| 上游端口 | `19387` | `3080` | ✅ 代理**自动发现**（并发探测 + 换端口重签 cookie） |
+| 右栏开关状态 | `data-rightbar-collapsed` 语义不可靠；关闭态面板 `translate` 出屏 | 同样属性语义不可靠；**关闭态容器仍留在屏内**（内容被 `translateX(420px)` 推出） | ✅ 统一改认「收起右侧边栏」按钮是否在视口内 —— 两版关闭态该按钮都在 x≈800（屏外） |
+| 开关右栏时的 DOM 变化 | 改 class | **只改内联 `style`** | ✅ 监听 `style` + 800ms 兜底巡检（sync 幂等） |
+| 会话行内 hover 操作按钮 | hover 显形 | hover 显形（`操作`/`归档会话`/`置顶会话`） | ✅ 统一：不放大 + 触屏摘掉「归档会话」 |
+| 菜单 / 模态 / 宽表格 / 复制钮等原语 | 来自 `dsh-client-ui-primitives` | 同源 | ✅ 规则同时生效 |
+| 工具行展开区 | `_bodyWrap` / `_block` / `_copyButton` / `_inspectButton` | `O_Ebla_*`（工具卡）、`ztWv_q_*`（行）、`_action[aria-label="复制"]` | ⚠️ **部分**：旧规则保留（新版为空操作）；新版复制钮已补 32px；展开区其余适配**待做**（审计降级为 WARN，不假绿） |
+| 移动端布局规则（dvh / safe-area / 抽屉 / z-index / 手势） | 与版本无关 | 同 | ✅ |
+
+**怎么判断当前跑的是哪个版本 / 契约有没有变**：
+
+1. 跑审计：`DOM 契约` 组 FAIL = 版本变了（先怀疑 DSH 改版，别怀疑适配层逻辑）。
+2. 审计的「工具行展开」组会打印当前命中哪套选择器（旧版断言 / 新版 WARN）。
+3. 端口不用管：代理日志里的 `upstream 可用/切换为 …` 会告诉你它认到了哪个端口。
