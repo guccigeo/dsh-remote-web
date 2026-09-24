@@ -9,7 +9,9 @@
   "accessLog": "access.log",
   "mobileEnhance": true,
 
-  "_说明_upstream": "可省略：省略时先读环境变量 DSH_WEB_URL，再退回 127.0.0.1:19387。macOS 上 DSH 端口不一定一致，从 DSH 里启动代理时留空最省事。",
+  "_说明_upstream": "可省略：省略时先读环境变量 DSH_WEB_URL，再退回 127.0.0.1:19387。新版 DSH 的端口是动态的（实测 19387 → 3080），代理会自动发现；这里写什么只是「优先试它」。",
+  "_说明_scrubWords": "提交闸门（tools/check-secrets.py）的额外屏蔽词：只属于你的东西（另一个项目的名字与端口、云厂商/面板工具字样、你的域名等）通用模式认不出来，写在这里逐字比对。只填在本地 remote.config.json，不要提交。",
+  "scrubWords": [],
   "_说明_tunnel": "整段可省略：脚本会从 publicBaseUrl 推导 host/remotePort、从 listenPort 推导 localPort，密钥默认 ~/.ssh/id_ed25519。Windows（run-tunnel.ps1）与 mac/ 下的脚本都读这段。",
   "tunnel": {
     "host": "root@<你的服务器IP>",
