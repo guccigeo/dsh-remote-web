@@ -37,6 +37,13 @@ cmd.exe 用 OEM 代码页（中文 Windows = GBK）读 `.bat`，UTF-8 中文乱�
 → 用**独立启动器**：Windows 登录自启 VBS（`WScript.Shell.Run`）、macOS launchd、或 `start-all.bat`（`start` 脱离父进程）。
 → 排查时先分清是哪一层死了：`Test-NetConnection 127.0.0.1 -Port 19390`（代理）→ 服务器 `ss -ltn | grep 17933`（隧道）→ 再看上游端口（日志 `upstream …`）。
 
+**A9. 手机端「连接中断，正在重试」先分清是链路还是心跳，别急着换服务器。**
+用户以为「服务器不行了，要不要迁到别的服务器」。实测这台服务器完全没问题：RTT p50 **20ms**（50 次 ping，仅 1 次 168ms 尖峰）、TCP 握手 20ms、经隧道下载 2.9MB/s（≈23Mbps）、load **0.15**、隧道连续在线 3 天没断。
+真正的机制在 DSH 侧：Host 每 `websocketHeartbeatIntervalMs`（默认 **2000ms**）发一次 Ping，**连续 2 个周期无活动就终止 socket**（`MAX_MISSED_HEARTBEATS = 2`）——也就是**链路停顿 4 秒就断**。手机在 4G/5G 切换、弱信号、切前后台时停顿几秒是常态，于是客户端反复重连、界面一直显示「重试中」。官方文档原话：*网络可能停顿超过该间隔的部署必须调大它*。
+→ 调大 `typert-gateway`（`@deepseek-ai/dsh-api-gateway`）的 `websocketHeartbeatIntervalMs`（本机改 10000 → 容忍 20s），见 [STATE 5.6](STATE.md)。
+→ 代理侧加 `ws open/ws close … after Nms (client|upstream|error)` 日志：**谁先关、活了多久** 一眼可判 —— `client` = 手机侧（切后台/切网络/重载），`upstream` = DSH 心跳踢的，`error` = 管道/隧道报错。没有这个日志，界面文案三种原因长得一模一样。
+→ 判断「是不是服务器」的正确姿势是**量化对照**（RTT/带宽/load/隧道存活），不是体感。体感卡顿可能来自本层 JS（[B24](#b-移动端适配)），跟网络无关。
+
 ## B. 移动端适配
 
 **B1. 给 grid item 设 `position:absolute` 会让它退出自动排布，后续兄弟元素整体前移一轨。**
@@ -132,6 +139,14 @@ DSH 0.1.7 开关右栏时**只改内联 `style`（transform）**，不改 class 
 → 让位后还要补原生没做的两件小事：原生汉堡只有 28px（补 36px）、抽屉不含安全区（补 `padding-top: env(safe-area-inset-top)`）。
 → 审计把这条固化成 3 个不变量：侧栏 `z` > 遮罩 `z`、抽屉打开时会话行中心的 `elementFromPoint` 命中元素属于侧栏、原生汉堡展开时被抽屉盖住。**这类"看得见但点不动"的 bug，只有命中测试能抓到，光看截图看不出来。**
 
+**B24. 适配层自己也会让手机变卡：两个「看不出来」的开销。**
+用户反馈「手机没以前顺、有卡顿感」。对比基线（同一会话，Playwright 拦掉 `/__dsh-mobile/**` 跑一遍）后定位到两处，都是本层的：
+1. **`sync()` 用 rAF 去抖 ≈ 每帧都跑**，而里面 `rightbarFullscreenOpen()` 会 `document.querySelectorAll('button')` **全量扫按钮** —— 长会话里 300+ 个按钮，流式输出期间每帧扫一遍。实测掉帧 17 vs 原生 3、rAF p99 50ms vs 17ms。
+   → 收窄到右栏子树（`[class*="_rightbarCol"] button`，实测 117 → 10 个）；调度改 **120ms 节流 + 尾调用**；`document.hidden` 时直接跳过。
+2. **常驻的非 passive `touchmove` 监听**。为了让抽屉手势能 `preventDefault`，一开始写的是 `{capture:true, passive:false}` 常驻 —— 代价是浏览器对**每一次**触摸滚动都要等 JS 跑完才滚，手指一划就发涩。
+   → 只在「起点贴左缘、可能是抽屉手势」时**临时挂**非 passive 监听，判定结束（抬手 / 判定为滚动 / 手势完成）立刻摘掉；普通滚动全程 passive。
+→ 教训：**给移动端加交互，先问「这条监听是不是全局、是不是每帧」**。全局 + 每帧 + 全量 DOM 查询，三个里占两个就够把 60fps 打下来。
+
 ## C. 跨平台
 
 **C1. 跨平台路径用 `os.homedir()`，不要用 `process.env.USERPROFILE`。**
@@ -211,3 +226,16 @@ DOM 里更早的同名「设置」按钮是隐藏的，`.locator(...).first` 会
 `urllib.request.urlopen` 默认跟随跳转：请求 `/?token=…` 时代理先回 `303` 换 Cookie，客户端**自动跟到 `/` 且不再带 token** → 得到 `401`，看起来像「令牌通道坏了」，白排查一轮。
 → 测状态码要禁跟随（`HTTPRedirectHandler.redirect_request → None`，或 `curl` 不加 `-L`）；要测最终页面才跟随。
 → 另外 `Get-Content` 用 GBK 读 UTF-8 日志会把中文显示成乱码（`涓嶅彲鐢?`），**别据此判断文件坏了** —— 用 `python -c "open(..., encoding='utf-8')"` 或 `-Encoding utf8` 复核（见 [D1](#d-工具与流程)）。
+
+**D16. 重启服务时别把「重启」和「多开」搞混：supervisor 会把被你杀掉的子进程拉起来。**
+为了加日志杀掉 node 进程，再跑 `dsh_remote_web.vbs` —— 结果**两套 supervisor 并存**：旧 supervisor 立刻把子进程重新拉起，新子进程绑不上 19390，于是 `access.log` 里每 5 秒一条 `listen EADDRINUSE`，而真正在服务的还是旧那条链。
+→ 重启一律走 `stop-all.ps1`（它先杀 launcher 再杀子进程），确认「无残留」后再用 VBS 起一套。
+→ 验证方式：`Get-NetTCPConnection -LocalPort 19390` 只有一个 OwningProcess，且 `node.exe`/`ssh.exe` 各只有一个。
+
+**D17. `stop-all.ps1` 的命令行扫描会误杀「调用者自己」。**
+它的兜底 sweep 用 `*dsh-remote-web.mjs*` 之类的**文件名**通配去扫全部进程命令行 —— 只要调用链上任何进程的命令行里出现过这个文件名（例如 `node --check dsh-remote-web.mjs`，或 DSH 把整条命令包进 `runner.js` 的子进程），就会被当成 stray 杀掉。实测把自己的工具调用进程连同隧道一起端了。
+→ 通配要带**完整目录**（`$dir\run-proxy.ps1*`），并排除自身 + 全部祖先进程，且只对 `node.exe`/`powershell.exe`/`pwsh.exe`/`ssh.exe` 生效。
+
+**D18. 判断「卡不卡」要跟基线比，不能只看绝对值。**
+在流式输出期间量页面流畅度，绝对值（长任务几千毫秒）几乎全来自 DSH 渲染正文，跟适配层无关。正确做法是**同一会话、同一时刻跑两次**：一次正常加载、一次用 Playwright `route.abort()` 拦掉 `/__dsh-mobile/**`（等于关掉适配层），比 `longtaskTotal` / 掉帧数 / rAF p99。
+→ 实测差距：适配层 17 掉帧 / p99 50ms，原生 3 掉帧 / p99 17ms —— 这才定位到 `sync()` 每帧全量扫按钮 + 常驻非 passive `touchmove`。修完两边基本一致。

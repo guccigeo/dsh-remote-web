@@ -42,13 +42,35 @@ foreach ($f in @('proxy.launcher.pid', 'tunnel.launcher.pid', 'proxy.pid', 'tunn
 
 # Best-effort sweep for anything started outside the launchers.
 try {
-  $patterns = @('*run-proxy.ps1*', '*run-tunnel.ps1*', '*dsh-remote-web.mjs*', '*17933:127.0.0.1:19390*')
+  # Tightened patterns: match the *full path* under this feature's directory, so a
+  # caller whose command line merely mentions a file name (e.g. "node --check
+  # dsh-remote-web.mjs", or a DSH tool-call runner wrapping that text) is not hit.
+  # Real incident: the loose '*dsh-remote-web.mjs*' pattern killed the caller's own
+  # tool-call process.
+  $dir = $here.TrimEnd('\')
+  $patterns = @(
+    "$dir\run-proxy.ps1*",
+    "$dir\run-tunnel.ps1*",
+    "$dir\dsh-remote-web.mjs*",
+    '*17933:127.0.0.1:19390*'
+  )
   $self = $PID
+  # Never touch ourselves nor any ancestor: the shell that called stop-all may
+  # legitimately have the project path in its own command line.
+  $protected = @{}
+  $walk = $self
+  for ($i = 0; $i -lt 12 -and $walk; $i++) {
+    $protected[[int]$walk] = $true
+    $proc = Get-CimInstance Win32_Process -Filter ("ProcessId=$walk") -ErrorAction SilentlyContinue
+    if (-not $proc) { break }
+    $walk = $proc.ParentProcessId
+  }
   $hits = Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
     $cmd = $_.CommandLine
     if (-not $cmd) { return $false }
-    if ($_.ProcessId -eq $self) { return $false }
+    if ($protected.ContainsKey([int]$_.ProcessId)) { return $false }
     if ($cmd -like '*stop-all.ps1*') { return $false }
+    if ($_.Name -notin @('node.exe', 'powershell.exe', 'pwsh.exe', 'ssh.exe')) { return $false }
     foreach ($p in $patterns) { if ($cmd -like $p) { return $true } }
     return $false
   }

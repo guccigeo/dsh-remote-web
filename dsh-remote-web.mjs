@@ -453,10 +453,26 @@ async function proxyHttp(req, res, url, retried = false) {
 }
 
 // ── WebSocket / 任意 upgrade：原样双向管道（DSH 的 /api/remote.mux 走这里）──
+//
+// 为什么要记 open/close：手机上「网络连接重试中」= 这条 WS 断了，但断的原因分三类，
+// 光看界面分不出来：
+//   · client   —— 手机侧先关（切后台、锁屏、切网络、页面重载）
+//   · upstream —— DSH 先关（Host 心跳判定对端无活动：默认 2s ping × 2 次 = 4s 没活动就踢）
+//   · error    —— 管道报错（隧道抖动 / TCP 重置）
+// 记下来「活了多久 + 谁先关」，就能一眼判断是手机链路还是 DSH 心跳太紧。
 function proxyUpgrade(req, socket, head) {
   const headers = { ...req.headers, host: upstreamState.authority, cookie: currentDshCookie() }
   delete headers.authorization
   if (headers.origin !== undefined) headers.origin = upstreamState.origin
+
+  const startedAt = Date.now()
+  const path = redact(req.url ?? '/')
+  let settled = false
+  const settle = (reason) => {
+    if (settled) return
+    settled = true
+    log(`ws close ${path} after ${Date.now() - startedAt}ms (${reason})`)
+  }
 
   const upstreamSocket = netConnect(Number(upstreamState.port), upstreamState.host, () => {
     let raw = `${req.method} ${req.url} HTTP/1.1\r\n`
@@ -467,11 +483,13 @@ function proxyUpgrade(req, socket, head) {
     raw += '\r\n'
     upstreamSocket.write(raw)
     if (head !== undefined && head.length > 0) upstreamSocket.write(head)
+    log(`ws open ${path}`)
     upstreamSocket.pipe(socket)
     socket.pipe(upstreamSocket)
   })
   const fail = (error) => {
     log(`upgrade error: ${error.message}`)
+    settle(`error: ${error.message}`)
     // WebSocket 不好中途重试（握手已完成），这里只探测新端口，让下一次连接用对
     void discoverUpstream(`upgrade 连接失败：${error.message}`)
     socket.destroy()
@@ -479,8 +497,14 @@ function proxyUpgrade(req, socket, head) {
   }
   upstreamSocket.on('error', fail)
   socket.on('error', fail)
-  socket.on('close', () => upstreamSocket.destroy())
-  upstreamSocket.on('close', () => socket.destroy())
+  socket.on('close', () => {
+    settle('client')
+    upstreamSocket.destroy()
+  })
+  upstreamSocket.on('close', () => {
+    settle('upstream')
+    socket.destroy()
+  })
 }
 
 // ── HTTP 入口 ───────────────────────────────────────────────────────────────

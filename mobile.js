@@ -152,14 +152,26 @@
    *
    * 所以这里认**语义信号**：面板顶栏那个「收起右侧边栏」按钮是否真的落在视口里
    * （关闭态时它在 x≈798 的屏幕外）。拿不到按钮才退回量容器。
+   *
+   * ⚠️ 性能：这里**不能**扫全文档的 button。会话一长，页面上的按钮能到 300+ 个，
+   * 而 sync() 在流式输出期间每 120ms 就会跑一次 —— 全量扫描 + 逐个子树取值
+   * 在真机上直接变成掉帧（实测：有适配层掉 17 帧 / 无适配层掉 3 帧，p99 50ms vs 17ms）。
+   * 那个按钮一定在右栏子树里（实测 117 个按钮 → 右栏内只有 10 个），先收窄再找。
    */
   function rightbarFullscreenOpen() {
-    var buttons = document.querySelectorAll('button')
-    for (var i = 0; i < buttons.length; i++) {
-      var label = buttons[i].getAttribute('aria-label') || ''
-      if (label.indexOf('收起右侧边栏') === -1) continue
-      var box = buttons[i].getBoundingClientRect()
+    var col = document.querySelector('[class*="_rightbarCol"]')
+    var closeBtn = col ? col.querySelector('button[aria-label="收起右侧边栏"]') : null
+    if (closeBtn) {
+      var box = closeBtn.getBoundingClientRect()
       return box.width > 2 && box.left >= -1 && box.right <= window.innerWidth + 1
+    }
+    if (col) {
+      var scoped = col.querySelectorAll('button')
+      for (var i = 0; i < scoped.length; i++) {
+        if ((scoped[i].getAttribute('aria-label') || '').indexOf('收起右侧边栏') === -1) continue
+        var sb = scoped[i].getBoundingClientRect()
+        return sb.width > 2 && sb.left >= -1 && sb.right <= window.innerWidth + 1
+      }
     }
     var panel = document.querySelector('[class*="_rightbarCol"] [class*="_panel"]')
     if (!panel) return false
@@ -273,24 +285,26 @@
     } else {
       gesture = { x: t.clientX, y: t.clientY, mode: 'close', decided: false }
     }
+    addMoveGuard()
   }
 
   function onTouchMove(event) {
     if (!gesture || gesture.decided) return
-    if (!event.touches || event.touches.length !== 1) { gesture = null; return }
+    if (!event.touches || event.touches.length !== 1) { gesture = null; removeMoveGuard(); return }
     var t = event.touches[0]
     var dx = t.clientX - gesture.x
     var dy = t.clientY - gesture.y
     if (Math.abs(dx) < 12 && Math.abs(dy) < 12) return // 还没走出抖动区
-    if (Math.abs(dx) <= Math.abs(dy) * 2) { gesture = null; return } // 偏垂直，是滚动
-    if (gesture.mode === 'open' && dx < 0) { gesture = null; return }
-    if (gesture.mode === 'close' && dx > 0) { gesture = null; return }
+    if (Math.abs(dx) <= Math.abs(dy) * 2) { gesture = null; removeMoveGuard(); return } // 偏垂直，是滚动
+    if (gesture.mode === 'open' && dx < 0) { gesture = null; removeMoveGuard(); return }
+    if (gesture.mode === 'close' && dx > 0) { gesture = null; removeMoveGuard(); return }
     gesture.decided = true
     // 成立：阻止浏览器把这个横滑解释成「返回」
     if (event.cancelable) event.preventDefault()
   }
 
   function onTouchEnd(event) {
+    removeMoveGuard()
     if (!gesture) return
     var decided = gesture.decided
     var mode = gesture.mode
@@ -310,20 +324,45 @@
     if (mode === 'close' && expanded && dx < 0) toggleSidebar()
   }
 
-  document.addEventListener('touchstart', onTouchStart, true)
-  document.addEventListener('touchmove', onTouchMove, { capture: true, passive: false })
-  document.addEventListener('touchend', onTouchEnd, true)
+  /* 非 passive 的 touchmove 会让浏览器对**每一次**触摸滚动都等 JS 跑完再滚 ——
+     手机上这是实打实的掉帧来源（手指一划就发涩）。
+     所以只在「起点贴着左缘、可能是抽屉手势」时才临时挂上非 passive 监听，
+     判定结束（抬手 / 判定为滚动 / 手势完成）立刻摘掉。普通滚动全程走 passive。 */
+  var moveGuard = null
+  function addMoveGuard() {
+    if (moveGuard) return
+    moveGuard = onTouchMove
+    document.addEventListener('touchmove', moveGuard, { capture: true, passive: false })
+  }
+  function removeMoveGuard() {
+    if (!moveGuard) return
+    document.removeEventListener('touchmove', moveGuard, true)
+    moveGuard = null
+  }
 
-  /* React 会整体重挂载 DOM，所以不能只观察 frame 本身：
-     挂在 body 上，属性 + 子节点一起看，用 rAF 去抖。 */
-  var scheduled = false
+  document.addEventListener('touchstart', onTouchStart, { capture: true, passive: true })
+  document.addEventListener('touchend', onTouchEnd, true)
+  document.addEventListener('touchcancel', onTouchEnd, true)
+
+  /* React 会整体重挂载 DOM，所以不能只观察 frame 本身：挂在 documentElement 上，
+     属性 + 子节点一起看。
+
+     ⚠️ 节流，不要用 rAF：流式输出期间 DOM 每秒变几十次，rAF 去抖等于**每帧**跑一次
+     sync()；sync 里哪怕只做几个 querySelector，在 200+ 工具行的长会话上也会累积成
+     掉帧（实测：有适配层 17 帧 / 无适配层 3 帧）。这里改成 120ms 节流 + 尾调用，
+     状态变化最多延迟 120ms —— 人手感知不到，但省下的是每帧的开销。 */
+  var syncTimer = null
+  var lastSyncAt = 0
+  var SYNC_MIN_GAP = 120
+  function runSync() {
+    syncTimer = null
+    lastSyncAt = Date.now()
+    if (!document.hidden) sync()
+  }
   function schedule() {
-    if (scheduled) return
-    scheduled = true
-    requestAnimationFrame(function () {
-      scheduled = false
-      sync()
-    })
+    if (syncTimer !== null) return
+    var wait = Math.max(0, SYNC_MIN_GAP - (Date.now() - lastSyncAt))
+    syncTimer = window.setTimeout(runSync, wait)
   }
 
   var observer = new MutationObserver(schedule)

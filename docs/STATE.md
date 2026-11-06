@@ -43,9 +43,23 @@ curl -s -o NUL -w "%{http_code} %{size_download}\n" \
      -H "Cookie: dsh-remote=$TOK" http://<服务器IP>:17933/                           # 期望 200 ~31KB
 ```
 
-最近一次：`401 / 303 / 200 (31318 字节)`。
+最近一次：`401 / 303 / 200 (45080 字节)`。
 
 WebSocket（DSH 流式走 `/api/remote.mux`，不是 SSE）也在本地验证过：无凭证 `401`，带凭证 `101 Switching Protocols`。
+
+**链路质量实测（2026-11-07，判「是不是服务器的问题」用这组数）**：
+
+| 指标 | 实测 | 结论 |
+|---|---|---|
+| RTT（50 次 ping） | p50 **20ms**，p90 20ms，最大 168ms（1 次尖峰） | 正常 |
+| TCP 握手到 17933 | 19–23ms | 正常 |
+| 经隧道下载静态资源 | 724KB/948KB → **2.9MB/s ≈ 23Mbps** | 正常（远超 UI 需求） |
+| 服务器 load / 内存 | 0.15 / 1.8GB（用 1.1GB，swap 463MB） | 空闲，不是瓶颈 |
+| 服务器 TCP 重传率 | 3.4M / 359M ≈ 0.96%（165 天累计） | 偏高但非主因 |
+| 隧道连续在线 | 3 天未断（`ssh -R` 进程启动于 11-04） | 稳定 |
+| mux 长连接稳定性 | 空闲 90s / 带负载 170s 各 1 次建连、**0 次断开** | 稳定 |
+
+→ 结论：**不是服务器的问题**，不需要迁移服务器（详见 [5.6](#56-连接稳定性连接中断正在重试)）。
 
 ### 2.3 服务健康
 
@@ -53,8 +67,9 @@ WebSocket（DSH 流式走 `/api/remote.mux`，不是 SSE）也在本地验证过
 |---|---|---|
 | 代理在听 | `Test-NetConnection 127.0.0.1 -Port 19390` | True |
 | 隧道在服务器上 | ssh 到服务器 `ss -ltn \| grep 17933` | `0.0.0.0:17933` 由 sshd 监听 |
-| 代理日志 | `Get-Content access.log -Tail 20` | 有 `upstream 可用/切换为 …`、`minted DSH session cookie`、`listening` |
+| 代理日志 | `Get-Content access.log -Tail 20` | 有 `upstream 可用/切换为 …`、`minted DSH session cookie`、`listening`、`ws open/close … (client\|upstream\|error)` |
 | 上游端口对不对 | 日志里的 `upstream …` | 与 `$env:DSH_WEB_URL` 的端口一致（不一致时代理会自己发现并切换） |
+| 服务实例唯一 | `Get-NetTCPConnection -LocalPort 19390` | **只有一个** OwningProcess；`node.exe`/`ssh.exe` 各一个（多开会出现 `listen EADDRINUSE`，见 [PITFALLS D16](PITFALLS.md)） |
 | 公网三层 | 裸访问 `401` / 带 `?token=` `303` / 带 Cookie `200` | 见 2.2 |
 
 > **重启 DSH 后按顺序查**：① 代理还在不在（19390）→ 不在就 `start-all.bat`；② 隧道还在不在（服务器 17933）→ 不在就重启隧道；③ 上游端口（日志里的 `upstream`）→ 代理会自动发现，正常会看到一行 `upstream 切换为 …`。
@@ -153,6 +168,44 @@ DSH 从 Electron 打包版切到 **npm 安装的 `0.1.7-alpha.2`** 后，实测�
 | **DSH 升级** | 低-中 | 适配层靠 DOM 契约。升级后跑一次审计即可发现（契约断言的用途） |
 | **Windows 与 Mac 同时启动** | 低 | 会抢远端端口 17933，后启动的一方 `ExitOnForwardFailure` 失败后进重试循环 |
 
+### 5.6 连接稳定性（「连接中断，正在重试」）
+
+**症状**：手机端偶尔/经常在侧栏底部出现连接状态提示（`连接中断，正在重试` / `重新连接中`），伴随卡顿感。
+
+**先排除服务器**：见 [2.2 的链路质量实测](#22-公网链路) —— RTT 20ms、23Mbps、load 0.15、隧道 3 天未断、mux 在 90s 空闲 + 170s 带负载下 **0 次断开**。所以**不是服务器的问题，不需要迁移**。
+
+**真正的机制（DSH 侧，已从 asar 源码核对）**：
+
+| 项 | 值 | 含义 |
+|---|---|---|
+| `websocketHeartbeatIntervalMs` | 默认 **2000ms** | Host 发 Ping 的周期，**同时是活动截止时间** |
+| `MAX_MISSED_HEARTBEATS` | **2** | 连续 2 个周期没有任何活动 → Host **终止 socket** |
+| 净效果 | **停顿 4 秒就断** | 手机在 4G/5G 切换、弱信号、切前后台时停顿几秒是常态 → 反复重连 |
+
+官方文档原话：*"a deployment whose event loop or network can stall longer than this interval must raise it."*
+
+**已做的两件事**：
+
+1. **调大心跳容忍度**（本机 `~/.dsh/profiles/desktop/cordis.patch.yml`，需**重启 DSH 生效**）：
+   ```yaml
+   - id: typert-gateway
+     name: "@deepseek-ai/dsh-api-gateway"
+     config:
+       websocketHeartbeatIntervalMs: 10000   # 10s ping → 容忍 20s 停顿
+   ```
+   备份：`cordis.patch.yml.bak-20261107-conn`。
+2. **代理侧加连接日志**（`access.log`），下次再出现时能直接判因：
+   ```
+   ws open /api/remote.mux
+   ws close /api/remote.mux after 10672ms (client)     # 手机侧先关：切后台/切网络/重载
+   ws close /api/remote.mux after 185431ms (upstream)  # DSH 心跳判定无活动后踢的
+   ws close /api/remote.mux after 812ms (error: ...)   # 管道/隧道报错
+   ```
+   → 看到 `upstream` 且寿命接近「上一次活动 + 4s」，就是心跳太紧（调大即可）；
+   → 看到 `client`，是手机侧主动断的（切后台/锁屏/网络切换），属于预期，刷新即恢复。
+
+**卡顿感的另一半在客户端渲染，不在网络**：见 [PITFALLS B24](PITFALLS.md)。长会话（200+ 工具行、1 万 DOM 节点、130MB 堆）本身就是重活，适配层若再「每帧全量扫按钮 + 常驻非 passive touchmove」会雪上加霜 —— 已修（收窄查询 + 120ms 节流 + 手势期间才挂非 passive）。
+
 ## 六、环境事实
 
 | 项 | 值 |
@@ -163,6 +216,8 @@ DSH 从 Electron 打包版切到 **npm 安装的 `0.1.7-alpha.2`** 后，实测�
 | sshd | 需要 `GatewayPorts clientspecified`（否则 `-R` 只绑到 127.0.0.1） |
 | 云安全组实际放行 | 以自己服务器为准（本项目默认用 `17933/tcp`） |
 | DSH GUI 端口 | **动态**（实测重启后 `19387` → `3080` → `7640`）。代理自动发现，配置里的 `upstream` 只是候选提示 |
+| DSH 版本 | **桌面 `0.2.2-rc.1`（nightly，Electron 打包）**；上一轮是 npm `0.1.7-alpha.2`。0.2.2 起 App 自带响应式抽屉（见 [5.4](#54-dsh-版本差异与待适配)） |
+| mux 心跳 | Host `websocketHeartbeatIntervalMs` 默认 2000ms、`MAX_MISSED_HEARTBEATS=2`（停顿 4s 即断）。本机已在 profile patch 里调到 **10000ms**（需重启 DSH 生效，见 [5.6](#56-连接稳定性连接中断正在重试)） |
 | 代理监听 | `127.0.0.1:19390`（固定） |
 | 隧道 | `本机 19390 → 服务器 0.0.0.0:17933` |
 | 令牌 | `remote.config.json` → `token`（该文件不入库） |

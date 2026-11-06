@@ -61,6 +61,7 @@ DSH index.html ──► 代理改写 <head> ──► 手机
 | 25 | 无手势 | 只能点汉堡/遮罩 | **左缘 24px 右滑开抽屉、抽屉上左滑关**（阈值 64px、横向优势 2 倍，不抢滚动；判定成立 preventDefault 压制浏览器边缘返回） | mobile.js，审计有合成触摸断言 |
 | 26 | **触屏点会话被误归档**（严重） | 「侧栏按钮补 44px」把 hover 才显形的行内操作按钮也撑成 44×44 → 容器占满整行右侧 **152/256px（59%）**、行高 32px 还溢出到相邻行，「归档会话」正好压在标题/时间上；手机一按就触发粘滞 hover、按钮在手指底下冒出来 | ①行内操作按钮**排除**放大规则；②触屏**摘掉「归档会话」**（保留置顶/操作）；③操作区起点 x=108 → **x=218**（占 16%） | [PITFALLS B22](PITFALLS.md)；审计新增 2 条断言（hover 后逐点探测命中元素） |
 | 27 | **侧栏打开后整页点不动**（严重，DSH 0.2.2 原生抽屉冲突） | 新版 DSH 自带抽屉：侧栏 `z-index:71`、`drawerMask` **70**；我们旧规则把侧栏写成 **15**（选择器权重 4 个 class 级 > 原生的 3），把侧栏压到遮罩底下 —— 遮罩半透明所以侧栏**看得见**，但点击全落在遮罩上：点会话=关抽屉、点设置=关抽屉，整页等于死掉 | 适配层**整体让位**：第 0/1/1b 条全部加 `:not([data-sidebar-drawer])`；原生模式下不再注入自己的遮罩/汉堡，只把原生汉堡补到 36px | [PITFALLS B23](PITFALLS.md)；审计新增 3 条不变量（侧栏 z>遮罩 z、会话行命中元素属于侧栏、原生汉堡展开时被抽屉盖住） |
+| 28 | **适配层自己让手机变卡**（用户报「没以前顺」） | ①`sync()` 用 rAF 去抖≈每帧跑，里面 `querySelectorAll('button')` 全量扫（长会话 300+ 按钮）；②常驻非 passive `touchmove` 让每次滚动都等 JS。实测掉帧 **17 vs 原生 3**、rAF p99 **50ms vs 17ms** | ①右栏查询收窄到 `[class*="_rightbarCol"] button`（117→10 个）+ 120ms 节流尾调用 + `document.hidden` 跳过；②非 passive 监听改成**手势期间才挂**，抬手即摘 | [PITFALLS B24](PITFALLS.md)；`tools/probe-jank.py` 可复现（含 `--no-enhance` 基线） |
 
 ## 四、DOM 契约（最重要）
 
@@ -152,6 +153,13 @@ python tools/mobile-audit.py --keep-open        # 保留浏览器调试
 - 退出码：0 全过，1 有失败 —— 可直接接 CI
 - 令牌从 `remote.config.json` 读，脚本里没有密钥
 - `--webkit` 需要先 `python -m playwright install webkit`；未安装则 WARN 跳过，不影响退出码
+
+**另外两个专项探针**（不属于审计，排查用）：
+
+| 脚本 | 用途 | 典型用法 |
+|---|---|---|
+| `tools/probe-jank.py` | 页面流畅度：长任务 / rAF 帧间隔 / 掉帧 / DOM 规模 / 堆内存。带 `--no-enhance` 会拦掉 `/__dsh-mobile/**`，量**原生基线**做对照（判断卡顿是不是适配层造成的） | `python tools/probe-jank.py --url public --seconds 15` 与 `… --no-enhance` 各跑一次，比 `dropped` / `rafP99` |
+| `tools/probe-conn.py` | 长连接稳定性：WebSocket 建连/断开次数、帧数、帧间隔、连接指示器出现次数 | `python tools/probe-conn.py --url public --seconds 120` |
 
 **判据说明与已知误报白名单**（判据细节都在脚本注释里）：
 

@@ -217,9 +217,11 @@ PROBE_JS = """() => {
       const c = cls(el);
       // 侧栏会话/工作区标题：抽屉只有 280px，长标题省略号是原生设计行为，
       // 不算回归 —— 实测「业务通报工作流成功版…」被误报过。
+      // `_objective` 是输入框上方的「目标」状态条（349px 一行），目标文本本来
+      // 就是单行省略（点击可展开），同理不算回归。
       const inSideRow = !!(el.closest && el.closest('[class*="_sessionRow"], [class*="_projectRow"]'));
       const byDesign = inSideRow ||
-        /_summary|_paths$|_crumb|_label$|_count$|_fileLink|_filePath|visuallyHidden/i.test(c);
+        /_summary|_paths$|_crumb|_label$|_count$|_fileLink|_filePath|_objective|visuallyHidden/i.test(c);
       if (!byDesign) issues.truncated.push({ el: desc(el), w: Math.round(r.width), scrollW: el.scrollWidth, text: text.slice(0, 26) });
     }
   }
