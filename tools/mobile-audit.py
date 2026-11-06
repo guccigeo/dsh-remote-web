@@ -68,7 +68,37 @@ STATE_JS = """() => {
     return { w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.x), y: Math.round(b.y) }; };
   const titleRowEl = q('[data-slot="root"] > [class*="_frame"] > [class*="_centerCol"] [class*="_titleRow"]');
   const input = q('[class*="_composerSeat"] textarea, [class*="_composerSeat"] [contenteditable]:not([contenteditable="false"]), [class*="_composerSeat"] [class*="_input"]');
+  // 新版 DSH（≥0.1.7）原生抽屉：frame[data-sidebar-drawer] + drawerMask(z70) + [data-sidebar-opener]
+  const opener = q('[data-sidebar-opener]');
+  const mask = q('[data-sidebar-mask]');
+  const maskCS = mask ? getComputedStyle(mask) : null;
+  // 「抽屉可点」的命中探针：抽屉开着时，会话行中心的命中元素必须仍属于侧栏。
+  // 2026-11 事故里这里命中的是 drawerMask（z70 压在我们 z15 的抽屉上），整页点不动。
+  const firstRow = side ? side.querySelector('[class*="_sessionRow"]') : null;
+  let rowHit = null;
+  if (firstRow && !(frame && frame.hasAttribute('data-sidebar-collapsed'))) {
+    const rb = firstRow.getBoundingClientRect();
+    const el = document.elementFromPoint(rb.x + Math.min(rb.width * 0.45, 120), rb.y + rb.height / 2);
+    rowHit = el ? (side.contains(el) ? 'sidebar' : (typeof el.className === 'string' ? el.className.split(' ')[0] : el.tagName)) : null;
+  }
+  const acct = side ? [...side.querySelectorAll('button')].find(b => (b.getAttribute('aria-label') || '').indexOf('账号菜单') !== -1) : null;
   return {
+    nativeDrawer: !!(frame && frame.hasAttribute('data-sidebar-drawer')),
+    opener: box(opener),
+    openerShown: !!opener && !!(opener.getBoundingClientRect().width > 2),
+    openerCovered: (() => {
+      if (!opener) return null;
+      const r = opener.getBoundingClientRect();
+      if (r.width < 2) return null;
+      const el = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return !!(side && el && side.contains(el));
+    })(),
+    maskPe: maskCS ? maskCS.pointerEvents : null,
+    maskOpacity: maskCS ? maskCS.opacity : null,
+    maskZ: maskCS ? maskCS.zIndex : null,
+    sidebarZ: side ? getComputedStyle(side).zIndex : null,
+    rowHit: rowHit,
+    accountMenu: box(acct),
     inputFontSize: input ? parseFloat(getComputedStyle(input).fontSize) : null,
     vw: innerWidth, vh: innerHeight,
     grid: frame ? getComputedStyle(frame).gridTemplateColumns : null,
@@ -185,7 +215,11 @@ PROBE_JS = """() => {
     if (el.children.length === 0 && cs.overflow === 'hidden' && el.scrollWidth > el.clientWidth + 2 &&
         text.length > 2 && r.width > 2) {
       const c = cls(el);
-      const byDesign = /_summary|_paths$|_crumb|_label$|_count$|_fileLink|_filePath|visuallyHidden/i.test(c);
+      // 侧栏会话/工作区标题：抽屉只有 280px，长标题省略号是原生设计行为，
+      // 不算回归 —— 实测「业务通报工作流成功版…」被误报过。
+      const inSideRow = !!(el.closest && el.closest('[class*="_sessionRow"], [class*="_projectRow"]'));
+      const byDesign = inSideRow ||
+        /_summary|_paths$|_crumb|_label$|_count$|_fileLink|_filePath|visuallyHidden/i.test(c);
       if (!byDesign) issues.truncated.push({ el: desc(el), w: Math.round(r.width), scrollW: el.scrollWidth, text: text.slice(0, 26) });
     }
   }
@@ -276,17 +310,71 @@ def open_settings(page) -> dict:
            }"""
     )
     if not probe.get("found"):
-        raise RuntimeError("抽屉里找不到可见的设置按钮")
-
-    page.evaluate(
-        """() => {
-             const btns = [...document.querySelectorAll('button')].filter(b => {
-               const r = b.getBoundingClientRect(); return r.width > 2 && r.height > 2; });
-             const set = btns.find(b => (b.getAttribute('aria-label') || '') === '设置'
-                                     || (b.textContent || '').trim() === '设置');
-             if (set) set.click();
-           }"""
-    )
+        # 新版 DSH 把「设置」收进了左下角账号菜单（侧栏里没有独立设置按钮）。
+        # 这里走两步：点账号菜单 -> 点菜单里的「设置」。
+        # 顺带把「菜单是否在遮罩之上」也测了 —— 原生抽屉模式下菜单挂在 body 的
+        # portal 里（z 1100），必须高于 drawerMask 70，否则同样点不动。
+        acct = page.evaluate(
+            """() => {
+                 const b = [...document.querySelectorAll('button')]
+                   .find(x => (x.getAttribute('aria-label') || '').indexOf('账号菜单') !== -1
+                              && x.getBoundingClientRect().width > 2);
+                 if (!b) return { found: false };
+                 const r = b.getBoundingClientRect();
+                 const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                 return { found: true, hittable: !!top && (top === b || b.contains(top)),
+                          topCls: top ? String(top.className || '').slice(0, 40) : null };
+               }"""
+        )
+        if not acct.get("found"):
+            raise RuntimeError("抽屉里既没有设置按钮，也没有账号菜单")
+        page.evaluate(
+            """() => {
+                 const b = [...document.querySelectorAll('button')]
+                   .find(x => (x.getAttribute('aria-label') || '').indexOf('账号菜单') !== -1
+                              && x.getBoundingClientRect().width > 2);
+                 if (b) b.click();
+               }"""
+        )
+        page.wait_for_timeout(900)
+        item = page.evaluate(
+            """() => {
+                 const menus = [...document.querySelectorAll('[role="menu"]')]
+                   .filter(m => m.getBoundingClientRect().width > 20);
+                 for (const m of menus) {
+                   for (const it of m.querySelectorAll('[role="menuitem"], button')) {
+                     if (!(it.textContent || '').includes('设置')) continue;
+                     const r = it.getBoundingClientRect();
+                     if (r.width < 20) continue;
+                     const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                     const ok = !!top && (top === it || it.contains(top));
+                     if (!ok) continue;
+                     it.click();
+                     return { found: true, hittable: ok,
+                              topCls: top ? String(top.className || '').slice(0, 40) : null };
+                   }
+                 }
+                 return { found: false };
+               }"""
+        )
+        if not item.get("found"):
+            raise RuntimeError("账号菜单里没有可命中的「设置」项")
+        opened_by = "account-menu"
+        hittable = bool(acct.get("hittable")) and bool(item.get("hittable"))
+        top_cls = item.get("topCls")
+    else:
+        page.evaluate(
+            """() => {
+                 const btns = [...document.querySelectorAll('button')].filter(b => {
+                   const r = b.getBoundingClientRect(); return r.width > 2 && r.height > 2; });
+                 const set = btns.find(b => (b.getAttribute('aria-label') || '') === '设置'
+                                         || (b.textContent || '').trim() === '设置');
+                 if (set) set.click();
+               }"""
+        )
+        opened_by = "js-click"
+        hittable = bool(probe.get("hittable"))
+        top_cls = probe.get("topCls")
 
     opened = False
     for _ in range(24):
@@ -297,9 +385,9 @@ def open_settings(page) -> dict:
             break
         page.wait_for_timeout(250)
     if not opened:
-        raise RuntimeError("JS click 之后设置对话框没出现")
+        raise RuntimeError("点击之后设置对话框没出现")
 
-    return {"openedBy": "js-click", "hittable": bool(probe.get("hittable")), "topCls": probe.get("topCls")}
+    return {"openedBy": opened_by, "hittable": hittable, "topCls": top_cls}
 
 
 def reset_mobile_ui(page) -> str:
@@ -340,6 +428,57 @@ def reset_mobile_ui(page) -> str:
            }"""
     )
     return "右栏浮层" + ("已收起" if not still else "收起失败（仍在）")
+
+
+def open_drawer(page) -> str:
+    """打开会话抽屉，返回用的是哪个入口（幂等）。
+
+    版本差异（重要）：
+      · 新版 DSH（≥0.1.7）原生支持抽屉：frame[data-sidebar-drawer]，
+        App 自己在 shell.leading 座里渲染 [data-sidebar-opener]（打开侧边栏），
+        我们注入的 [data-dshm-hamburger] 在原生模式下**主动移除**（会跟它重叠）。
+      · 旧版没有原生抽屉，靠我们注入的汉堡。
+    """
+    st = page.evaluate(
+        """() => {
+             const f = document.querySelector('[data-slot="root"] > [class*="_frame"]');
+             const o = document.querySelector('[data-sidebar-opener]');
+             const b = document.querySelector('[data-dshm-hamburger]');
+             return { collapsed: f ? f.hasAttribute('data-sidebar-collapsed') : null,
+                      opener: !!o && o.getBoundingClientRect().width > 0,
+                      burger: !!b && !b.hasAttribute('hidden') };
+           }"""
+    )
+    # 已经开着就别再点：原生汉堡在抽屉展开时是 inert 的，但程序化 click 仍会
+    # 派发事件 → 反而把抽屉关掉，后面所有抽屉断言全崩（实测踩过）。
+    if st["collapsed"] is False:
+        return "already-open"
+    used = page.evaluate(
+        """() => {
+             const o = document.querySelector('[data-sidebar-opener]');
+             if (o && o.getBoundingClientRect().width > 0) { o.click(); return 'opener'; }
+             const b = document.querySelector('[data-dshm-hamburger]');
+             if (b && !b.hasAttribute('hidden')) { b.click(); return 'hamburger'; }
+             return 'none';
+           }"""
+    )
+    page.wait_for_timeout(1200)
+    return used
+
+
+def close_drawer(page) -> None:
+    """收起抽屉：原生模式点 App 的 drawerMask，旧版点我们注入的遮罩。"""
+    page.evaluate(
+        """() => {
+             const f = document.querySelector('[data-slot="root"] > [class*="_frame"]');
+             if (f && f.hasAttribute('data-sidebar-collapsed')) return;
+             const mask = document.querySelector('[data-sidebar-mask]');
+             if (mask) { mask.dispatchEvent(new MouseEvent('click', {bubbles: true})); return; }
+             const bd = document.querySelector('[data-dshm-backdrop]');
+             if (bd) bd.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+           }"""
+    )
+    page.wait_for_timeout(900)
 
 
 def main() -> int:
@@ -414,44 +553,71 @@ def main() -> int:
             rep.warn(g, "App 恢复了右栏全屏面板", reset_note + "（否则汉堡按钮被藏、点不到）")
         s = page.evaluate(STATE_JS)
         rep.check(g, "grid 第一轨为 0", s["grid"].startswith("0px"), f"grid={s['grid']}")
-        rep.check(g, "侧栏列宽 ≤2px", (s["sidebar"] or {}).get("w", 99) <= 2, f"sidebar={s['sidebar']}")
+        # 原生抽屉的侧栏不是 0 宽，而是 translate(-100%) 推到屏外（x=-280、右缘=0）。
+        # 判据改成「可视宽度为 0」：宽 ≤2 或右缘 ≤2。
+        _sb = s["sidebar"] or {}
+        _visible_w = max(0, min(_sb.get("x", 0) + _sb.get("w", 0), s["vw"]) - max(_sb.get("x", 0), 0))
+        rep.check(g, "侧栏可视宽度 ≤2px（抽屉收起）", _visible_w <= 2,
+                  "sidebar=%s 可视宽=%s" % (_sb, _visible_w))
         rep.check(g, "主区域占满视口", (s["center"] or {}).get("w", 0) >= s["vw"] - 2, f"center={s['center']}")
-        rep.check(g, "汉堡按钮存在且可见", s["burgerExists"] and s["burgerShown"], f"shown={s['burgerShown']}")
-        bb, tb = s["burgerBox"], s["titleRow"]
+        if s["nativeDrawer"]:
+            # 原生抽屉模式：入口是 App 自己的 [data-sidebar-opener]，适配层只把它补到 36px。
+            op = s["opener"] or {}
+            rep.check(g, "原生抽屉入口存在且可见", s["openerShown"], "opener=%s" % (op,))
+            rep.check(g, "原生抽屉入口 ≥36px（触屏可用）", op.get("w", 0) >= 36 and op.get("h", 0) >= 36,
+                      "opener 尺寸=%sx%s（适配层补到 36）" % (op.get("w"), op.get("h")))
+            rep.check(g, "自注入汉堡已移除（不与原生入口重叠）", not s["burgerExists"],
+                      "burgerExists=%s" % (s["burgerExists"],))
+        else:
+            rep.check(g, "汉堡按钮存在且可见", s["burgerExists"] and s["burgerShown"], f"shown={s['burgerShown']}")
+        bb = (s["opener"] if s["nativeDrawer"] else s["burgerBox"])
+        tb = s["titleRow"]
         if bb and tb and s["titleRowContentX"] is not None:
             rep.check(g, "汉堡不压会话标题", bb["x"] + bb["w"] <= s["titleRowContentX"] + 2,
                       f"汉堡右={bb['x'] + bb['w']} 标题内容左={s['titleRowContentX']}")
         page.screenshot(path=str(OUT / "phone-01-loaded.png"))
 
         # 2) 打开一个会话，检查正文宽度 / 挤压 / 截断 / 重叠
-        rows = page.locator('[data-slot="root"] [role="treeitem"]')
         opened = False
-        page.locator('[data-dshm-hamburger]').first.click(timeout=5000)
-        page.wait_for_timeout(1500)
+        used = open_drawer(page)
+        if used == "none":
+            rep.check("手机 · 抽屉入口", "能打开抽屉（原生汉堡或自注入汉堡）", False,
+                      "两个入口都没找到，后续抽屉相关断言不可信")
+        page.wait_for_timeout(300)
 
         # 侧栏渲染出来了，这时才能查列表相关的契约元素
         for name, ok in page.evaluate(CONTRACT_LIST_JS).items():
             rep.check(cg, name, bool(ok), "" if ok else "选择器没命中（抽屉打开后仍找不到）")
 
-        for i in range(min(rows.count(), 40)):
-            try:
-                t = rows.nth(i).inner_text(timeout=1000)
-            except Exception:
-                continue
-            if ("分钟" in t or "小时" in t or "天" in t) and "新建会话" not in t:
-                # 点标题而不是行中心：新版会话行中间挂着 _iconButton（操作按钮），
-                # 点它会命中"排除 iconButton"的分支，抽屉就不会自动收起（实测踩过）。
-                title = rows.nth(i).locator('[class*="_title"]')
-                (title.first if title.count() else rows.nth(i)).click(timeout=4000)
-                opened = True
-                break
+        # 选一个「非当前」会话打开。不能用 [role=treeitem]：新版 DSH 的会话行是
+        # wnFoaW_sessionRow + aria-selected，已经没有 treeitem 角色（实测）。
+        # 点标题而不是行中心：行右侧挂着 _iconButton 操作按钮，点它会命中
+        # 「排除 iconButton」的分支，抽屉就不会自动收起（实测踩过）。
+        clicked = page.evaluate(
+            """() => {
+                 const rows = [...document.querySelectorAll('[class*="_sessionRow"]')]
+                   .filter(r => { const b = r.getBoundingClientRect(); return b.width > 4 && b.height > 4; });
+                 const target = rows.find(r => r.getAttribute('aria-selected') !== 'true') || rows[0];
+                 if (!target) return null;
+                 const t = target.querySelector('[class*="_title"]') || target;
+                 t.click();
+                 return (t.textContent || '').trim().slice(0, 40);
+               }"""
+        )
+        opened = clicked is not None
         page.wait_for_timeout(4000)
 
         g = "手机 · 选会话后"
         s2 = page.evaluate(STATE_JS)
         rep.check(g, "抽屉已自动收起", s2["collapsed"] is True, f"collapsed={s2['collapsed']}")
-        rep.check(g, "遮罩已移除", not s2["backdrop"], f"backdrop={s2['backdrop']}")
-        rep.check(g, "汉堡按钮回来了", s2["burgerShown"], "")
+        if s2["nativeDrawer"]:
+            rep.check(g, "遮罩已失效（原生 mask 不再吃点击）", s2["maskPe"] in (None, "none"),
+                      "mask pointer-events=%s" % (s2["maskPe"],))
+        else:
+            rep.check(g, "遮罩已移除", not s2["backdrop"], f"backdrop={s2['backdrop']}")
+        rep.check(g, "抽屉入口回来了",
+                  (s2["openerShown"] if s2["nativeDrawer"] else s2["burgerShown"]),
+                  "native=%s opener=%s burgerShown=%s" % (s2["nativeDrawer"], s2["opener"], s2["burgerShown"]))
         rep.check(g, "找到可打开的会话", opened, "（没有历史会话时跳过）")
         if s2["messageCol"]:
             want = s2["vw"] - 40
@@ -476,15 +642,37 @@ def main() -> int:
             rep.warn(g, "输入区紧凑触发器截断", f"{len(known_trunc)} 处 例: {known_trunc[0]}")
         page.screenshot(path=str(OUT / "phone-02-chat.png"))
 
-        # 3) 汉堡 -> 抽屉
+        # 3) 打开抽屉 -> 抽屉组断言
         g = "手机 · 抽屉"
-        page.locator('[data-dshm-hamburger]').first.click(timeout=5000)
-        page.wait_for_timeout(1500)
+        open_drawer(page)
+        page.wait_for_timeout(300)
         s3 = page.evaluate(STATE_JS)
         rep.check(g, "侧栏变为 absolute 浮层", s3["sidebarPos"] == "absolute", f"pos={s3['sidebarPos']}")
-        rep.check(g, "遮罩出现", s3["backdrop"], "")
+        if s3["nativeDrawer"]:
+            rep.check(g, "遮罩出现（原生 drawerMask 生效）",
+                      s3["maskPe"] == "auto" and float(s3["maskOpacity"] or 0) > 0.5,
+                      "pe=%s opacity=%s z=%s" % (s3["maskPe"], s3["maskOpacity"], s3["maskZ"]))
+        else:
+            rep.check(g, "遮罩出现", s3["backdrop"], "")
         rep.check(g, "主区域仍占满视口", (s3["center"] or {}).get("w", 0) >= s3["vw"] - 2, f"center={s3['center']}")
-        rep.check(g, "汉堡按钮隐藏", not s3["burgerShown"], "")
+        if s3["nativeDrawer"]:
+            rep.check(g, "原生汉堡展开后被抽屉盖住（不挡抽屉点击）", s3["openerCovered"] is True,
+                      "openerCovered=%s opener=%s" % (s3["openerCovered"], s3["opener"]))
+        else:
+            rep.check(g, "汉堡按钮隐藏", not s3["burgerShown"], "")
+
+        # 3-0) ⚠️ 回归守卫：抽屉必须**可点**。
+        #     2026-11 真事故：新版 DSH 原生抽屉 z-index 71 + drawerMask 70，而我们的
+        #     旧规则把侧栏写成 z-index 15（选择器权重更高，压过了原生 71）——侧栏被
+        #     压到遮罩底下：视觉上还看得见（遮罩半透明），但点击全落在遮罩上，
+        #     点会话=关抽屉、点设置=关抽屉，整页等于死掉（用户实测报障）。
+        #     这里用 elementFromPoint 直接验「会话行中心的命中元素属于侧栏」。
+        rep.check(g, "抽屉在遮罩之上（侧栏 z > mask z）",
+                  (s3["sidebarZ"] or "0").isdigit() and (s3["maskZ"] or "0").isdigit()
+                  and int(s3["sidebarZ"]) > int(s3["maskZ"]),
+                  "sidebar z=%s mask z=%s" % (s3["sidebarZ"], s3["maskZ"]))
+        rep.check(g, "会话行命中元素属于侧栏（可点，不是遮罩）", s3["rowHit"] == "sidebar",
+                  "rowHit=%s" % (s3["rowHit"],))
         page.screenshot(path=str(OUT / "phone-03-drawer.png"))
 
         # 3a) 行内操作按钮不得覆盖行主体 —— 触屏「点会话变归档」的真凶。
@@ -533,13 +721,10 @@ def main() -> int:
         #     不算页面溢出（探针已含裁剪感知）。这里盯的是真正漏出去的元素。
         g = "手机 · 轨迹 tab"
         try:
-            bd = page.locator('[data-dshm-backdrop]')
-            if bd.count():
-                # 遮罩 inset:0 铺满，但抽屉（z-15）压在它左半边 —— 点几何中心会落在
-                # 抽屉上。点靠右侧（抽屉宽 min(84vw,320px)，x=400 一定在抽屉外）。
-                bd.first.click(position={"x": 400, "y": 500}, timeout=3000)
-                page.wait_for_timeout(800)
-            page.locator('[class*="_tabs"] [class*="_tab"]', has_text="轨迹").first.click(timeout=4000)
+            # 先收抽屉（原生点 App 的 drawerMask、旧版点自注入遮罩）——抽屉盖着时
+            # tab 在抽屉底下点不到。
+            close_drawer(page)
+            page.locator('button[role="tab"]', has_text="轨迹").first.click(timeout=4000)
             page.wait_for_timeout(2000)
             tprobe = page.evaluate(PROBE_JS)
             rep.check(g, "无横向溢出", len(tprobe["overflow"]) == 0,
@@ -547,7 +732,7 @@ def main() -> int:
             rep.check(g, "无组件重叠", len(tprobe["overlap"]) == 0,
                       f"{len(tprobe['overlap'])} 处" + (f" 例: {tprobe['overlap'][0]}" if tprobe["overlap"] else ""))
             page.screenshot(path=str(OUT / "phone-05-trajectory.png"))
-            page.locator('[class*="_tabs"] [class*="_tab"]', has_text="对话").first.click(timeout=4000)
+            page.locator('button[role="tab"]', has_text="对话").first.click(timeout=4000)
             page.wait_for_timeout(1200)
         except Exception as exc:  # noqa: BLE001
             rep.check(g, "打开轨迹 tab", False, str(exc)[:80])
@@ -653,7 +838,8 @@ def main() -> int:
                 rep.check(g, "面板全屏铺满", r["panel"] and r["panel"]["w"] >= r["vw"] - 2 and r["panel"]["x"] <= 2,
                           f"panel={r['panel']}")
                 rep.check(g, "面板可见", r["panelVis"] == "visible", f"vis={r['panelVis']}")
-                rep.check(g, "汉堡按钮已让位", r["burgerShown"] is False, f"shown={r['burgerShown']}")
+                # 原生抽屉模式没有自注入汉堡（元素被移除，burgerShown=null），也算让位
+                rep.check(g, "汉堡按钮已让位", r["burgerShown"] in (False, None), f"shown={r['burgerShown']}")
                 rep.check(g, "收起按钮可命中", r["closeHit"] is True, f"hit={r['closeHit']}")
                 page.screenshot(path=str(OUT / "phone-07-rightbar.png"))
                 page.locator('button[aria-label="收起右侧边栏"]').first.click(timeout=3000)
@@ -703,8 +889,8 @@ def main() -> int:
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(5000)
             reset_mobile_ui(page)  # 重载后 App 可能又恢复出全屏面板
-            page.locator('[data-dshm-hamburger]').first.click(timeout=5000)
-            page.wait_for_timeout(1800)
+            open_drawer(page)
+            page.wait_for_timeout(600)
             how = open_settings(page)
             rep.check(g, "设置入口可点（elementFromPoint 命中自身）", how["hittable"],
                       f"openedBy={how['openedBy']} 最上层={how['topCls']}")
@@ -712,10 +898,17 @@ def main() -> int:
             dlg = page.evaluate(
                 """() => {
                   const q = s => document.querySelector(s);
-                  const ov = q('[class*="_overlay"]:not([class*="_overlayLayer"])');
+                  // 不能直接取第一个 _overlay：新版 DSH 里 GRgSLq_overlayAnchor 也是
+                  // _overlay 命名（0 高锚点），必须挑「真有 _panel 子节点」的那个。
+                  const ov = [...document.querySelectorAll('[class*="_overlay"]:not([class*="_overlayLayer"])')]
+                    .find(o => o.querySelector(':scope > [class*="_panel"]')) || null;
                   const panel = ov ? ov.querySelector(':scope > [class*="_panel"]') : null;
-                  const nav = panel ? panel.querySelector(':scope > [class*="_nav"]') : null;
-                  const content = panel ? panel.querySelector(':scope > [class*="_content"]') : null;
+                  // 导航必须是 <nav>：新版把 navTitle / navList 也起成 _nav* 名字，
+                  // 用 [class*="_nav"] 会先命中 navTitle（方向同为 row，会假 PASS）。
+                  const nav = panel ? panel.querySelector(':scope > nav[class*="_nav"]') : null;
+                  // 内容区：旧版叫 _content，新版改成 _options（直接挂在 panel 下）。
+                  const content = panel ? (panel.querySelector(':scope > [class*="_content"]')
+                                           || panel.querySelector(':scope > [class*="_options"]')) : null;
                   const b = el => { if (!el) return null; const r = el.getBoundingClientRect();
                     return { w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.x) }; };
                   const cs = el => el ? getComputedStyle(el) : null;
@@ -772,9 +965,10 @@ def main() -> int:
             open_settings(page2)
             page2.wait_for_timeout(1200)
             dd = page2.evaluate(
-                """() => { const ov = document.querySelector('[class*="_overlay"]:not([class*="_overlayLayer"])');
+                """() => { const ov = [...document.querySelectorAll('[class*="_overlay"]:not([class*="_overlayLayer"])')]
+                     .find(o => o.querySelector(':scope > [class*="_panel"]')) || null;
                      const panel = ov ? ov.querySelector(':scope > [class*="_panel"]') : null;
-                     const nav = panel ? panel.querySelector(':scope > [class*="_nav"]') : null;
+                     const nav = panel ? panel.querySelector(':scope > nav[class*="_nav"]') : null;
                      const b = el => { if (!el) return null; const r = el.getBoundingClientRect();
                        return { w: Math.round(r.width), h: Math.round(r.height) }; };
                      return { panel: b(panel), panelDir: panel ? getComputedStyle(panel).flexDirection : null,
@@ -800,21 +994,21 @@ def main() -> int:
                 s = wpage.evaluate(STATE_JS)
                 rep.check(g, "grid 第一轨为 0", s["grid"].startswith("0px"), f"grid={s['grid']}")
                 rep.check(g, "主区域占满视口", (s["center"] or {}).get("w", 0) >= s["vw"] - 2, f"center={s['center']}")
-                rep.check(g, "汉堡按钮可见", s["burgerShown"], "")
+                rep.check(g, "抽屉入口可见",
+                          s["openerShown"] if s["nativeDrawer"] else s["burgerShown"],
+                          "native=%s" % (s["nativeDrawer"],))
                 rep.check(g, "输入框字号 ≥16px", (s["inputFontSize"] or 0) >= 16, f"font-size={s['inputFontSize']}")
                 # 开一个会话看正文列与溢出
-                wpage.locator('[data-dshm-hamburger]').first.click(timeout=5000)
+                open_drawer(wpage)
                 wpage.wait_for_timeout(1500)
-                rows = wpage.locator('[data-slot="root"] [role="treeitem"]')
-                for i in range(min(rows.count(), 40)):
-                    try:
-                        t = rows.nth(i).inner_text(timeout=1000)
-                    except Exception:
-                        continue
-                    if ("分钟" in t or "小时" in t or "天" in t) and "新建会话" not in t:
-                        title = rows.nth(i).locator('[class*="_title"]')
-                        (title.first if title.count() else rows.nth(i)).click(timeout=4000)
-                        break
+                wpage.evaluate(
+                    """() => {
+                         const rows = [...document.querySelectorAll('[class*="_sessionRow"]')]
+                           .filter(r => { const b = r.getBoundingClientRect(); return b.width > 4 && b.height > 4; });
+                         const target = rows.find(r => r.getAttribute('aria-selected') !== 'true') || rows[0];
+                         if (target) (target.querySelector('[class*="_title"]') || target).click();
+                       }"""
+                )
                 wpage.wait_for_timeout(4000)
                 s2 = wpage.evaluate(STATE_JS)
                 rep.check(g, "选会话后抽屉自动收起", s2["collapsed"] is True, f"collapsed={s2['collapsed']}")

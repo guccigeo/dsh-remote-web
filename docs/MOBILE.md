@@ -60,6 +60,7 @@ DSH index.html ──► 代理改写 <head> ──► 手机
 | 24 | 标题行角落/右栏顶栏按钮 28px | 难按（实测 28–31px） | coarse 下 36px | — |
 | 25 | 无手势 | 只能点汉堡/遮罩 | **左缘 24px 右滑开抽屉、抽屉上左滑关**（阈值 64px、横向优势 2 倍，不抢滚动；判定成立 preventDefault 压制浏览器边缘返回） | mobile.js，审计有合成触摸断言 |
 | 26 | **触屏点会话被误归档**（严重） | 「侧栏按钮补 44px」把 hover 才显形的行内操作按钮也撑成 44×44 → 容器占满整行右侧 **152/256px（59%）**、行高 32px 还溢出到相邻行，「归档会话」正好压在标题/时间上；手机一按就触发粘滞 hover、按钮在手指底下冒出来 | ①行内操作按钮**排除**放大规则；②触屏**摘掉「归档会话」**（保留置顶/操作）；③操作区起点 x=108 → **x=218**（占 16%） | [PITFALLS B22](PITFALLS.md)；审计新增 2 条断言（hover 后逐点探测命中元素） |
+| 27 | **侧栏打开后整页点不动**（严重，DSH 0.2.2 原生抽屉冲突） | 新版 DSH 自带抽屉：侧栏 `z-index:71`、`drawerMask` **70**；我们旧规则把侧栏写成 **15**（选择器权重 4 个 class 级 > 原生的 3），把侧栏压到遮罩底下 —— 遮罩半透明所以侧栏**看得见**，但点击全落在遮罩上：点会话=关抽屉、点设置=关抽屉，整页等于死掉 | 适配层**整体让位**：第 0/1/1b 条全部加 `:not([data-sidebar-drawer])`；原生模式下不再注入自己的遮罩/汉堡，只把原生汉堡补到 36px | [PITFALLS B23](PITFALLS.md)；审计新增 3 条不变量（侧栏 z>遮罩 z、会话行命中元素属于侧栏、原生汉堡展开时被抽屉盖住） |
 
 ## 四、DOM 契约（最重要）
 
@@ -76,6 +77,9 @@ DSH index.html ──► 代理改写 <head> ──► 手机
 |---|---|---|---|
 | frame | `[data-slot="root"] > [class*="_frame"]` | 布局网格根 | **所有**布局规则失效 |
 | `data-sidebar-collapsed` | frame 上的属性（仅折叠时存在） | 判断侧栏开合 | 抽屉/浮层判断全错 |
+| `data-sidebar-drawer` | frame 上的属性（**新版原生抽屉模式**才存在） | 判断该不该让位给原生抽屉 | **侧栏被压到遮罩底下 → 整页点不动**（B23） |
+| `data-sidebar-mask` | `[data-sidebar-mask]`（原生 `drawerMask`，z-70） | 原生遮罩；审计用它点遮罩收抽屉 | 收起抽屉失效 |
+| `data-sidebar-opener` | `[data-sidebar-opener]`（原生 `shell.leading` 座里的「打开侧边栏」） | 原生汉堡入口 | 手机上打不开会话列表 |
 | `data-rightbar-collapsed` | frame 上的属性 | 右栏状态 | — |
 | sidebarCol | `… > [class*="_sidebarCol"]` | 侧栏列 | 抽屉失效 |
 | centerCol | `… > [class*="_centerCol"]` | 主区域 | 标题避让失效 |
@@ -116,6 +120,12 @@ DSH index.html ──► 代理改写 <head> ──► 手机
 | 菜单卡片 | 1100 | App | portal 模式 fixed 定位 |
 | **触屏子菜单（底部浮层）** | **1101** | 本层 | 必须压过父菜单的 1100 |
 | 设置对话框 overlay | App 自定 | App | 打开时汉堡按钮一并隐藏 |
+| **原生抽屉遮罩**（`drawerMask`） | **70** | App（DSH ≥0.2.2） | 只有原生抽屉模式才有；我们**不覆盖**它 |
+| **原生抽屉侧栏** | **71** | App（DSH ≥0.2.2） | 必须 > 70，否则侧栏被遮罩吃掉点击（B23） |
+
+> **一条硬规则**：`data-sidebar-drawer` 存在时，本层不得给 `sidebarCol` 设任何 `z-index`/`position`/`width`。
+> 我们的选择器权重天然更高（`[data-slot] > [class*="_frame"]:not(...) > [class*="_sidebarCol"]` 是 4 个 class 级，
+> 原生 `.hash_frame[data-sidebar-drawer] .hash_sidebarCol` 是 3 个），一旦写了就会盖掉原生的 71。
 
 ## 六、断点
 
@@ -163,11 +173,27 @@ python tools/mobile-audit.py --keep-open        # 保留浏览器调试
 7. 截图肉眼确认一遍——数字对不代表好看。
 8. 提交，提交信息里写清「原状 → 修后」的实测数值。
 
-## 九、版本兼容矩阵（旧版 Electron ↔ 新版 npm 0.1.7）
+## 九、版本兼容矩阵（旧版 Electron ↔ npm 0.1.7 ↔ 桌面 0.2.2 原生抽屉）
 
-**结论：一套适配层同时兼容两个版本。** 原理是选择器只认 local 名与语义属性，所以 hash 全换（`ONzo8q` → `EvIC1a` 等）也不受影响；真正需要版本判断的地方都改成了「语义信号」而不是「结构猜测」。
+**结论：一套适配层同时兼容三个版本。** 原理是选择器只认 local 名与语义属性，所以 hash 全换也不受影响；真正需要版本判断的地方都改成了「语义信号」而不是「结构猜测」，**能不用版本号就不用版本号** —— 唯一的例外是原生抽屉（它带来的不是样式差异，而是「谁负责画抽屉」的归属问题，必须用 `data-sidebar-drawer` 显式让位）。
 
-| 功能 | 旧版（Electron 打包） | 新版 `0.1.7-alpha.2`（npm） | 两版兼容性 |
+| 版本 | 形态 | 侧栏 | 适配层角色 |
+|---|---|---|---|
+| 旧版 Electron（`ONzo8q_*`） | 桌面布局 | 靠 grid 轨道占宽 | **我们造抽屉**（轨道归零 + absolute 浮层 + 自注入遮罩/汉堡） |
+| npm `0.1.7-alpha.2`（`pI_x6G_*`） | 桌面布局 | 同 | 同上 |
+| 桌面 `0.2.2-rc.1`（`mP3x-q_*`，nightly） | **自带响应式抽屉** | `viewport<768` 时 App 自己切抽屉（`data-sidebar-drawer` + `drawerMask` z-70 + 侧栏 z-71 + `shell.leading` 里的原生汉堡 + `inert`） | **让位**：不造抽屉、不注入遮罩/汉堡，只把原生汉堡从 28px 补到 36px |
+
+`0.2.2-rc.1` 独有的差异（其余与 0.1.7 相同）：
+
+| 差异点 | 旧行为 | 0.2.2-rc.1 | 适配层处理 |
+|---|---|---|---|
+| 侧栏由谁画 | 我们（轨道归零 + absolute z-15） | App（absolute z-71 + `drawerMask` z-70） | 三条抽屉规则加 `:not([data-sidebar-drawer])`，**整体让位**（[B23](PITFALLS.md)） |
+| 汉堡入口 | 自注入 `[data-dshm-hamburger]`（fixed z-55） | 原生 `[data-sidebar-opener]`（`shell.leading` 座，28px） | 原生模式移除自注入汉堡；原生汉堡补到 36px |
+| 遮罩 | 自注入 `[data-dshm-backdrop]`（z-12） | 原生 `[data-sidebar-mask]`（z-70，点击即关） | 原生模式不再注入自己的遮罩 |
+| 设置面板结构 | `panel > nav + content > options` | `panel > navTitle + nav + header + options` | 审计按「真有 `_panel` 的 overlay」「`nav` 标签」「`_content` 或 `_options`」收敛选择器 |
+| 账号菜单 | 侧栏底部直接有「设置」 | 「设置」收进左下角**账号菜单**（portal z-1100） | 审计两步走：点账号菜单 → 点「设置」，并顺带验证菜单在遮罩之上 |
+
+| 功能 | 旧版（Electron 打包） | 新版 `0.1.7-alpha.2`（npm） | 兼容性 |
 |---|---|---|---|
 | 布局壳 frame/sidebarCol/centerCol/rightbarCol | `ONzo8q_*` | `pI_x6G_*`（本机实测；聊天流是 `EvIC1a_*`，右栏面板 `P3OORG_*`） | ✅ 只认 local 名 |
 | 侧栏会话行 / 工作区行 | `_sessionRow` / `_projectRow` | 同 local 名（hash 变） | ✅ |

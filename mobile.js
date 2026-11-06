@@ -21,6 +21,36 @@
     return document.querySelector('[data-slot="root"] > [class*="_frame"] > [class*="_sidebarCol"]')
   }
 
+  /* 新版 DSH（0.2.2 起）自带抽屉模式：frame 上有 [data-sidebar-drawer] 时，
+     App 自己负责 absolute 抽屉 + drawerMask(z70) + shell.leading 里的汉堡
+     + 给 centerCol/rightbar 挂 inert。这种情况下我们**什么都不用补**，
+     补了反而打架（上一版就是把 z-index 写成 15 压到遮罩 70 底下，
+     导致「侧栏可见但整页点不动」—— 已修，见 mobile.css 第 2b 条）。 */
+  function nativeDrawer() {
+    var frame = frameEl()
+    return !!(frame && frame.hasAttribute('data-sidebar-drawer'))
+  }
+
+  function sidebarOpen() {
+    var frame = frameEl()
+    return !!(frame && !frame.hasAttribute('data-sidebar-collapsed'))
+  }
+
+  /* 打开/收起侧栏的唯一入口。
+     收起态优先点 App 的原生汉堡 [data-sidebar-opener]（在 shell.leading 座里，
+     语义属性跨版本稳定）；展开态点侧栏自己的「收起侧边栏」。 */
+  function toggleSidebar() {
+    if (!sidebarOpen()) {
+      var opener = document.querySelector('[data-sidebar-opener]')
+      if (opener) { opener.click(); return true }
+    }
+    var toggle = findToggle()
+    if (toggle) { toggle.click(); return true }
+    var fallback = document.querySelector('[data-sidebar-opener]')
+    if (fallback) { fallback.click(); return true }
+    return false
+  }
+
   /* 侧栏折叠/展开的切换按钮。优先用稳定的 local 类名 _toggle，
      退路是 aria-label 里带「侧边栏 / sidebar」的那个按钮。 */
   function findToggle() {
@@ -63,8 +93,7 @@
       function (event) {
         event.preventDefault()
         event.stopPropagation()
-        var toggle = findToggle()
-        if (toggle) toggle.click()
+        toggleSidebar()
       },
       true
     )
@@ -98,6 +127,13 @@
    * 记录，配合下面的兜底巡检会变成每帧自激的循环。
    */
   function syncHamburger(narrow, collapsed) {
+    // 原生抽屉模式有 App 自己的汉堡（shell.leading 里的 [data-sidebar-opener]），
+    // 我们再塞一个会跟它叠在同一个角上（实测两者都在左上角 6~12px）。
+    if (nativeDrawer()) {
+      var own = document.querySelector('[' + HAMBURGER_ATTR + ']')
+      if (own) own.remove()
+      return
+    }
     var button = ensureHamburger()
     var show = narrow && collapsed && !hasOpenModal()
     if (show === !button.hasAttribute('hidden')) return
@@ -149,7 +185,7 @@
     // 右栏全屏打开时汉堡（z-55）会压在面板（z-40）顶栏上，一并藏起来。
     syncHamburger(narrow && !rightOpen, !expanded)
 
-    if (expanded && narrow) {
+    if (expanded && narrow && !nativeDrawer()) {
       if (document.documentElement.getAttribute(MARK) !== 'drawer') {
         document.documentElement.setAttribute(MARK, 'drawer')
       }
@@ -161,8 +197,7 @@
           function (event) {
             event.preventDefault()
             event.stopPropagation()
-            var toggle = findToggle()
-            if (toggle) toggle.click()
+            toggleSidebar()
           },
           true
         )
@@ -204,8 +239,7 @@
         attempts++
         var f = frameEl()
         if (!f || f.hasAttribute('data-sidebar-collapsed')) return
-        var toggle = findToggle()
-        if (toggle) toggle.click()
+        toggleSidebar()
         if (attempts < 4) window.setTimeout(collapse, 350)
       }
       window.setTimeout(collapse, 150)
@@ -269,13 +303,11 @@
     var dx = t.clientX - startX
     if (Math.abs(dx) < SWIPE_MIN) return
     if (Math.abs(t.clientY - startY) > Math.abs(dx) / 2) return
-    var toggle = findToggle()
-    if (!toggle) return
     var frame = frameEl()
     if (!frame) return
     var expanded = !frame.hasAttribute('data-sidebar-collapsed')
-    if (mode === 'open' && !expanded && dx > 0) toggle.click()
-    if (mode === 'close' && expanded && dx < 0) toggle.click()
+    if (mode === 'open' && !expanded && dx > 0) toggleSidebar()
+    if (mode === 'close' && expanded && dx < 0) toggleSidebar()
   }
 
   document.addEventListener('touchstart', onTouchStart, true)

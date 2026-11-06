@@ -27,12 +27,18 @@
         .click() 对不可见元素同样派发事件），供左上角汉堡按钮调用。
         两个状态下都归零：折叠时藏轨道，展开时侧栏是 absolute 浮层（见第 1 条）。
      --------------------------------------------------------------------- */
-  [data-slot="root"] > [class*="_frame"] {
+  /* 新版 DSH（0.2.2 起）自己就有抽屉模式：frame 上会出现 [data-sidebar-drawer]，
+     那时 App 已经把第一轨算成 0、侧栏做成 absolute 浮层、遮罩/汉堡/ inert 全带。
+     所以第 0/1/1b 条这些「我们自己造抽屉」的规则一律加 :not([data-sidebar-drawer])，
+     遇到原生抽屉就整体让位（事故复盘见第 2b 条）。 */
+  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-drawer]) {
     grid-template-columns: 0 minmax(0, 1fr) auto !important;
   }
 
-  /* 给汉堡按钮腾位置，免得压住会话标题/面包屑 */
-  [data-slot="root"] > [class*="_frame"] > [class*="_centerCol"] [class*="_titleRow"] {
+  /* 给汉堡按钮腾位置，免得压住会话标题/面包屑。
+     原生抽屉模式下这个位置由 App 的 shell.leading 座（自带汉堡）占用，
+     它通过 --dsh-frame-leading-clearance 自己留白，不能再叠 46px。 */
+  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-drawer]) > [class*="_centerCol"] [class*="_titleRow"] {
     padding-left: 46px !important;
   }
 
@@ -72,7 +78,7 @@
         第三轨保留 auto，右侧面板无论 fullscreen（fixed，贡献 0）还是
         docked（在流内，按内容宽）都成立。
      --------------------------------------------------------------------- */
-  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-collapsed]) > [class*="_sidebarCol"] {
+  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-drawer]):not([data-sidebar-collapsed]) > [class*="_sidebarCol"] {
     position: absolute;
     top: 0;
     bottom: 0;
@@ -93,7 +99,7 @@
   }
 
   /* 内层容器原本按 280px 定宽，跟着列宽走 */
-  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-collapsed]) > [class*="_sidebarCol"] > * {
+  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-drawer]):not([data-sidebar-collapsed]) > [class*="_sidebarCol"] > * {
     width: 100% !important;
   }
 
@@ -102,14 +108,15 @@
         坑：把侧栏设成 position:absolute 后它就退出了 grid 的自动排布，
         剩下两个在流内的子元素会各自前移一轨 —— centerCol 跑去占第 1 轨
         （宽 0），主区域反而变成 0 宽。必须显式指定 grid-column。
+        原生抽屉模式下三列用 App 自己的 grid-area，这里同样让位。
      --------------------------------------------------------------------- */
-  [data-slot="root"] > [class*="_frame"] > [class*="_sidebarCol"] {
+  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-drawer]) > [class*="_sidebarCol"] {
     grid-column: 1;
   }
-  [data-slot="root"] > [class*="_frame"] > [class*="_centerCol"] {
+  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-drawer]) > [class*="_centerCol"] {
     grid-column: 2;
   }
-  [data-slot="root"] > [class*="_frame"] > [class*="_rightbarCol"] {
+  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-drawer]) > [class*="_rightbarCol"] {
     grid-column: 3;
   }
 
@@ -124,6 +131,37 @@
     z-index: 12;
     background: rgb(0 0 0 / 32%);
     -webkit-tap-highlight-color: transparent;
+  }
+
+  /* ---------------------------------------------------------------------
+     2b. 新版 DSH（0.2.2 起）原生抽屉模式 —— 适配层让位，只做「补尺寸」。
+
+     原生契约（已从 app.asar 的 AppFrame.module.css 逐条核对）：
+       .frame[data-sidebar-drawer] .sidebarCol → position:absolute; z-index:71
+       .drawerMask                             → z-index:70；展开时 pointer-events:auto
+       .frame[data-sidebar-drawer] .leadingSeat → 左上角，内含 [data-sidebar-opener]
+       展开时 sidebarCol 71 > 遮罩 70，所以侧栏本来就该在遮罩之上、可点。
+
+     ⚠️ 真踩过的事故（用户报「侧栏打开可见、但整页点不动」）：
+       上一版第 1 条把侧栏写成 z-index:15，而我们选择器的权重是 4 个
+       class 级、高于原生的 3 个 —— z-index 被压成 15 < 70，侧栏被压到
+       遮罩底下。遮罩半透明，视觉上侧栏还看得见，但**所有点击都落在遮罩
+       上**（点会话 = 关抽屉，点设置 = 关抽屉），整页等于死掉。
+       修法不是把 15 改大，而是第 0/1/1b 条整体加 :not([data-sidebar-drawer])：
+       有原生抽屉就让位，没有（老版本 DSH）才走我们自造的浮层。
+
+     这里只补两件原生没做的事：
+       a) 原生汉堡 28×28 低于触屏可用尺寸，补到 36×36；
+       b) 抽屉顶部避开刘海/状态栏（原生 inset:0 auto 0 0 不含安全区）。
+     --------------------------------------------------------------------- */
+  [data-sidebar-opener] {
+    min-width: 36px;
+    min-height: 36px;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  [data-slot="root"] > [class*="_frame"][data-sidebar-drawer] > [class*="_sidebarCol"] {
+    padding-top: env(safe-area-inset-top, 0px);
   }
 
   /* ---------------------------------------------------------------------
@@ -142,7 +180,7 @@
   }
 
   /* 侧栏顶部避开刘海/状态栏 */
-  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-collapsed]) > [class*="_sidebarCol"] {
+  [data-slot="root"] > [class*="_frame"]:not([data-sidebar-drawer]):not([data-sidebar-collapsed]) > [class*="_sidebarCol"] {
     padding-top: env(safe-area-inset-top, 0px);
   }
 
